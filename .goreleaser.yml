@@ -1,0 +1,17 @@
+builds:
+  - id: "gst"
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    main: ./cmd/
+    binary: gst
+archives:
+  - id: "gst"
+    files:
+      - LICENSE
+      - README.md
+      - README_CN.md
