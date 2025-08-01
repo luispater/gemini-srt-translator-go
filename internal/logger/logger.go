@@ -215,6 +215,33 @@ func (pb *ProgressBar) SetSending(sending bool) {
 	pb.isSending = sending
 }
 
+// PrintErrorAbove prints an error message above the progress bar and recreates the bar below
+func (pb *ProgressBar) PrintErrorAbove(message, color string) {
+	pb.mu.Lock()
+	defer pb.mu.Unlock()
+
+	if quietMode {
+		return
+	}
+
+	// Clear the current progress bar display
+	if pb.lastHeight > 0 {
+		// Move cursor up to the beginning of previous progress bar
+		fmt.Printf("\033[%dA", pb.lastHeight)
+		// Clear from cursor to end of screen
+		fmt.Print("\033[J")
+	}
+
+	// Print the error message (this becomes part of the terminal history)
+	fmt.Println(colorize(color, message))
+
+	// Store the message for logging
+	storeMessage(message, color)
+
+	// Reset the progress bar state so it will render fresh below the error
+	pb.lastHeight = 0
+}
+
 // AddMessage adds a message to display below the progress bar
 func (pb *ProgressBar) AddMessage(message, color string) {
 	pb.mu.Lock()

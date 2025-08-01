@@ -11,10 +11,8 @@ import (
 	"time"
 	"unicode"
 
-	"google.golang.org/genai"
-
-	"github.com/luispater/gemini-srt-translator-go/internal/helpers"
 	"github.com/luispater/gemini-srt-translator-go/internal/logger"
+	"github.com/luispater/gemini-srt-translator-go/internal/providers"
 	"github.com/luispater/gemini-srt-translator-go/pkg/config"
 	"github.com/luispater/gemini-srt-translator-go/pkg/errors"
 	"github.com/luispater/gemini-srt-translator-go/pkg/srt"
@@ -26,12 +24,27 @@ type ProgressInfo struct {
 	InputFile string `json:"input_file"`
 }
 
+// ProgressBar wrapper to implement ProgressUpdater interface
+type ProgressBarWrapper struct {
+	bar *logger.ProgressBar
+}
+
+func (p *ProgressBarWrapper) SetLoading(loading bool) {
+	if p.bar != nil {
+		p.bar.SetLoading(loading)
+	}
+}
+
+func (p *ProgressBarWrapper) SetThinking(thinking bool) {
+	if p.bar != nil {
+		p.bar.SetThinking(thinking)
+	}
+}
+
 // Translator handles the subtitle translation process
 type Translator struct {
 	config           *config.Config
-	client           *genai.Client
-	apiKeys          []string
-	currentAPIIndex  int
+	provider         providers.TranslationProvider
 	batchNumber      int
 	tokenLimit       int32
 	tokenCount       int32
@@ -40,6 +53,7 @@ type Translator struct {
 	progressFile     string
 	logFilePath      string
 	thoughtsFilePath string
+	context          []providers.ContextMessage
 }
 
 // NewTranslator creates a new translator instance
@@ -81,49 +95,33 @@ func NewTranslator(cfg *config.Config) *Translator {
 		thoughtsFilePath = baseName + ".thoughts.log"
 	}
 
+	// Create provider
+	factory := &providers.ProviderFactory{}
+	provider, err := factory.NewProvider(cfg)
+	if err != nil {
+		// Log error but don't fail - will be handled during translation
+		logger.Warning(fmt.Sprintf("Failed to create provider: %v", err))
+	}
+
 	return &Translator{
 		config:           cfg,
-		apiKeys:          cfg.GeminiAPIKeys,
-		currentAPIIndex:  0,
+		provider:         provider,
 		batchNumber:      1,
 		outputFile:       outputFile,
 		progressFile:     progressFile,
 		logFilePath:      logFilePath,
 		thoughtsFilePath: thoughtsFilePath,
+		context:          []providers.ContextMessage{},
 	}
 }
 
-// getCurrentAPIKey returns the current API key if available
-func (t *Translator) getCurrentAPIKey() string {
-	if len(t.apiKeys) == 0 || t.currentAPIIndex >= len(t.apiKeys) {
-		return ""
-	}
-	return t.apiKeys[t.currentAPIIndex]
-}
-
-// hasAPIKeys returns true if there are API keys available
-func (t *Translator) hasAPIKeys() bool {
-	return len(t.apiKeys) > 0
-}
-
-// GetModels returns available Gemini models
+// GetModels returns available models from the provider
 func (t *Translator) GetModels(ctx context.Context) ([]string, error) {
-	if !t.hasAPIKeys() {
-		return nil, errors.NewValidationError("please provide a valid Gemini API key", nil)
+	if t.provider == nil {
+		return nil, errors.NewValidationError("no provider configured", nil)
 	}
-
-	client, err := helpers.CreateClient(ctx, t.config, t.getCurrentAPIKey())
-	if err != nil {
-		return nil, errors.NewAPIError("failed to create Gemini client", err)
-	}
-	defer func() {
-		// Client does not need explicit closing in new API
-	}()
-
-	return helpers.ListModels(ctx, client)
+	return t.provider.GetModels(ctx)
 }
-
-// ListModels prints available models to console
 
 // Translate performs the main translation process
 func (t *Translator) Translate(ctx context.Context) error {
@@ -159,8 +157,8 @@ func (t *Translator) Translate(ctx context.Context) error {
 
 // validatePrerequisites checks if all prerequisites are met
 func (t *Translator) validatePrerequisites() error {
-	if !t.hasAPIKeys() {
-		return errors.NewValidationError("please provide a valid Gemini API key", nil)
+	if t.provider == nil {
+		return errors.NewValidationError("no provider configured", nil)
 	}
 
 	if t.config.TargetLanguage == "" {
@@ -291,15 +289,7 @@ func (t *Translator) validateModel(ctx context.Context) error {
 
 // getTokenLimit retrieves the token limit for the current model
 func (t *Translator) getTokenLimit(ctx context.Context) error {
-	client, err := helpers.CreateClient(ctx, t.config, t.getCurrentAPIKey())
-	if err != nil {
-		return err
-	}
-	defer func() {
-		// Client does not need explicit closing in new API
-	}()
-
-	tokenLimit, err := helpers.GetTokenLimit(ctx, client, t.config.ModelName)
+	tokenLimit, err := t.provider.GetTokenLimit(ctx, t.config.ModelName)
 	if err != nil {
 		return err
 	}
@@ -369,29 +359,18 @@ func (t *Translator) performTranslation(ctx context.Context) error {
 		t.config.BatchSize = len(originalSubtitles)
 	}
 
-	// Setup delay for pro models with free quota
+	// Setup delay for pro models with free quota (only for Gemini)
 	delay := false
 	delayTime := 30 * time.Second
 
-	if strings.Contains(t.config.ModelName, "pro") && t.config.FreeQuota {
+	if t.provider.GetName() == "gemini" && strings.Contains(t.config.ModelName, "pro") && t.config.FreeQuota {
 		delay = true
-		if len(t.apiKeys) > 1 {
-			delayTime = 15 * time.Second
-			logger.Info("Pro model and free user quota detected, using multiple API keys if needed.\n")
-		} else {
-			logger.Info("Pro model and free user quota detected.\n")
-		}
+		delayTime = 15 * time.Second
+		logger.Info("Pro model and free user quota detected.\n")
 	}
-
-	// Create client
-	client, err := helpers.CreateClient(ctx, t.config, t.getCurrentAPIKey())
-	if err != nil {
-		return err
-	}
-	t.client = client
 
 	// Start translation
-	logger.Highlight(fmt.Sprintf("Starting translation of %d lines...\n", len(originalSubtitles)-t.config.StartLine+1))
+	logger.Highlight(fmt.Sprintf("Starting translation of %d lines using %s...\n", len(originalSubtitles)-t.config.StartLine+1, t.provider.GetName()))
 
 	progressBar := logger.NewProgressBar(len(originalSubtitles), "Translating:")
 	defer progressBar.Stop() // Ensure cleanup in case of early returns
@@ -403,7 +382,6 @@ func (t *Translator) performTranslation(ctx context.Context) error {
 
 	total := len(originalSubtitles)
 	var batch []srt.SubtitleObject
-	var previousMessage []*genai.Content
 
 	// Build context from previous translations if resuming
 	if t.config.StartLine > 1 {
@@ -429,23 +407,13 @@ func (t *Translator) performTranslation(ctx context.Context) error {
 		userData, _ := json.Marshal(userBatch)
 		modelData, _ := json.Marshal(modelBatch)
 
-		previousMessage = []*genai.Content{
-			{
-				Parts: []*genai.Part{{Text: string(userData)}},
-				Role:  "user",
-			},
-			{
-				Parts: []*genai.Part{{Text: string(modelData)}},
-				Role:  "model",
-			},
+		t.context = []providers.ContextMessage{
+			{Role: "user", Content: string(userData)},
+			{Role: "model", Content: string(modelData)},
 		}
 	}
 
 	progressBar.Update(i)
-
-	if len(t.apiKeys) > 1 {
-		progressBar.AddMessage(fmt.Sprintf("Starting with API Key %d", t.currentAPIIndex+1), logger.Cyan)
-	}
 
 	// Add first subtitle to batch
 	obj := srt.SubtitleObject{
@@ -481,13 +449,13 @@ func (t *Translator) performTranslation(ctx context.Context) error {
 
 		// Process batch
 		startTime := time.Now()
-		newPreviousMessage, errProcessBatch := t.processBatch(ctx, batch, previousMessage, translatedSubtitles, progressBar)
+		newContext, errProcessBatch := t.processBatch(ctx, batch, translatedSubtitles, progressBar)
 		if errProcessBatch != nil {
 			return errProcessBatch
 		}
 		endTime := time.Now()
 
-		previousMessage = newPreviousMessage
+		t.context = newContext
 
 		// Update progress
 		progressBar.Update(i)
@@ -535,7 +503,7 @@ func (t *Translator) validateTokenSize(ctx context.Context, batch []srt.Subtitle
 		return errors.NewTranslationError("failed to marshal batch", err)
 	}
 
-	tokenCount, err := helpers.CountTokens(ctx, t.client, "gemini-2.5-flash", string(batchData))
+	tokenCount, err := t.provider.CountTokens(ctx, t.config.ModelName, string(batchData))
 	if err != nil {
 		return errors.NewAPIError("failed to count tokens", err)
 	}
@@ -544,6 +512,8 @@ func (t *Translator) validateTokenSize(ctx context.Context, batch []srt.Subtitle
 
 	// Check if token count exceeds 90% of limit
 	if float64(tokenCount) > float64(t.tokenLimit)*0.9 {
+		// This is a critical error that requires user input, so we break the progress bar display
+		fmt.Printf("\n\n") // Add some spacing
 		logger.Error(fmt.Sprintf("Token size (%d) exceeds limit (%d) for %s", int(float64(tokenCount)/0.9), t.tokenLimit, t.config.ModelName))
 
 		// Ask user for new batch size
@@ -567,194 +537,68 @@ func (t *Translator) validateTokenSize(ctx context.Context, batch []srt.Subtitle
 }
 
 // processBatch processes a single batch of subtitles with retry logic
-func (t *Translator) processBatch(ctx context.Context, batch []srt.SubtitleObject, previousMessage []*genai.Content, translatedSubtitles []srt.Subtitle, progressBar *logger.ProgressBar) ([]*genai.Content, error) {
+func (t *Translator) processBatch(ctx context.Context, batch []srt.SubtitleObject, translatedSubtitles []srt.Subtitle, progressBar *logger.ProgressBar) ([]providers.ContextMessage, error) {
 	var lastErr error
+	progressWrapper := &ProgressBarWrapper{bar: progressBar}
 
 	for attempt := 0; attempt <= t.config.RetryCount; attempt++ {
 		if attempt > 0 {
-			logger.Warning(fmt.Sprintf("Retry attempt %d/%d", attempt, t.config.RetryCount))
+			progressBar.PrintErrorAbove(fmt.Sprintf("Retry attempt %d/%d", attempt, t.config.RetryCount), logger.Yellow)
 			progressBar.AddRetry()
 
-			// Switch to next API key if available
-			if len(t.apiKeys) > 1 {
-				t.currentAPIIndex = (t.currentAPIIndex + 1) % len(t.apiKeys)
-				progressBar.AddMessage(fmt.Sprintf("Switching to API Key %d", t.currentAPIIndex+1), logger.Yellow)
-
-				// Create new client with different API key
-				client, errCreateClient := helpers.CreateClient(ctx, t.config, t.getCurrentAPIKey())
-				if errCreateClient != nil {
-					lastErr = errCreateClient
-					continue
+			// Try to switch API key if provider supports it
+			if keySwitcher, ok := t.provider.(providers.KeySwitcher); ok {
+				if keySwitcher.SwitchAPIKey() {
+					progressBar.PrintErrorAbove(fmt.Sprintf("Switching to API Key %d", keySwitcher.GetCurrentAPIKeyIndex()+1), logger.Yellow)
 				}
-				t.client = client
 			}
 
 			// Add small delay between retries
 			time.Sleep(time.Duration(attempt) * 2 * time.Second)
 		}
 
-		result, errProcess := t.processBatchAttempt(ctx, batch, previousMessage, translatedSubtitles, progressBar)
+		result, errProcess := t.processBatchAttempt(ctx, batch, translatedSubtitles, progressWrapper)
 		if errProcess == nil {
+			// No need to clear messages anymore - errors stay in terminal history
 			return result, nil
 		}
 
 		lastErr = errProcess
-		logger.Error(fmt.Sprintf("Batch processing failed (attempt %d/%d): %v", attempt+1, t.config.RetryCount+1, errProcess))
+		progressBar.PrintErrorAbove(fmt.Sprintf("Batch processing failed (attempt %d/%d): %v", attempt+1, t.config.RetryCount+1, errProcess), logger.Red)
 	}
 
 	return nil, fmt.Errorf("batch processing failed after %d retries: %w", t.config.RetryCount, lastErr)
 }
 
 // processBatchAttempt performs a single attempt to process a batch
-func (t *Translator) processBatchAttempt(ctx context.Context, batch []srt.SubtitleObject, previousMessage []*genai.Content, translatedSubtitles []srt.Subtitle, progressBar *logger.ProgressBar) ([]*genai.Content, error) {
-	// Create generation config
-	thinkingCompatible := strings.Contains(t.config.ModelName, "2.5")
-	instruction := helpers.GetInstruction(
-		t.config.TargetLanguage,
-		t.config.Thinking,
-		thinkingCompatible,
-		t.config.Description,
-	)
+func (t *Translator) processBatchAttempt(ctx context.Context, batch []srt.SubtitleObject, translatedSubtitles []srt.Subtitle, progressWrapper *ProgressBarWrapper) ([]providers.ContextMessage, error) {
+	// Create translation config
+	translationConfig := &providers.TranslationConfig{
+		ModelName:       t.config.ModelName,
+		TargetLanguage:  t.config.TargetLanguage,
+		Description:     t.config.Description,
+		Temperature:     t.config.Temperature,
+		TopP:            t.config.TopP,
+		TopK:            t.config.TopK,
+		Streaming:       t.config.Streaming,
+		Thinking:        t.config.Thinking,
+		ThinkingBudget:  t.config.ThinkingBudget,
+		ProgressUpdater: progressWrapper,
+	}
 
-	// Build content parts
-	batchData, err := json.Marshal(batch)
+	// Call provider to translate batch
+	response, err := t.provider.TranslateBatch(ctx, batch, t.context, translationConfig)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal batch: %w", err)
-	}
-
-	var parts []*genai.Part
-	parts = append(parts, &genai.Part{Text: string(batchData)})
-
-	currentMessage := &genai.Content{
-		Parts: parts,
-		Role:  "user",
-	}
-
-	// Build full conversation history
-	var contents []*genai.Content
-
-	// Add system instruction as first message
-	systemContent := &genai.Content{
-		Parts: []*genai.Part{{Text: instruction}},
-		Role:  "model",
-	}
-	contents = append(contents, systemContent)
-
-	if len(previousMessage) > 0 {
-		contents = append(contents, previousMessage...)
-	}
-	contents = append(contents, currentMessage)
-
-	// Generate response
-	progressBar.SetLoading(true)
-
-	var responseText string
-
-	// Use the new API for content generation
-	genContentConfig := &genai.GenerateContentConfig{
-		SystemInstruction: &genai.Content{
-			Parts: []*genai.Part{{Text: instruction}},
-			Role:  "model",
-		},
-	}
-
-	// Set generation parameters
-	genConfig := helpers.GetGenerationConfig(t.config.Temperature, t.config.TopP, t.config.TopK)
-	if temp, ok := genConfig["temperature"].(float32); ok {
-		genContentConfig.Temperature = &temp
-	}
-	if topP, ok := genConfig["top_p"].(float32); ok {
-		genContentConfig.TopP = &topP
-	}
-	if topK, ok := genConfig["top_k"].(float32); ok {
-		genContentConfig.TopK = &topK
-	}
-	if mimeType, ok := genConfig["response_mime_type"].(string); ok {
-		genContentConfig.ResponseMIMEType = mimeType
-	}
-	if schema, hasSchema := genConfig["response_schema"].(map[string]interface{}); hasSchema {
-		// Convert schema to genai.Schema
-		jsonSchema := &genai.Schema{
-			Type: genai.Type(schema["type"].(string)),
-		}
-		if items, hasItems := schema["items"].(map[string]interface{}); hasItems {
-			jsonSchema.Items = &genai.Schema{
-				Type: genai.Type(items["type"].(string)),
-			}
-			if props, hasProps := items["properties"].(map[string]interface{}); hasProps {
-				jsonSchema.Items.Properties = make(map[string]*genai.Schema)
-				for key, prop := range props {
-					if propMap, isPropMap := prop.(map[string]interface{}); isPropMap {
-						jsonSchema.Items.Properties[key] = &genai.Schema{
-							Type: genai.Type(propMap["type"].(string)),
-						}
-					}
-				}
-			}
-			if required, hasRequired := items["required"].([]string); hasRequired {
-				jsonSchema.Items.Required = required
-			}
-		}
-		genContentConfig.ResponseSchema = jsonSchema
-	}
-
-	var thinkingBudget int32
-	if t.config.Thinking {
-		thinkingBudget = int32(t.config.ThinkingBudget)
-	} else {
-		if strings.Contains(t.config.ModelName, "gemini-2.5-pro") {
-			thinkingBudget = 128
-		} else {
-			thinkingBudget = 0
-		}
-	}
-	genContentConfig.MaxOutputTokens = 65536
-	genContentConfig.ThinkingConfig = &genai.ThinkingConfig{}
-	genContentConfig.ThinkingConfig.ThinkingBudget = &thinkingBudget
-	genContentConfig.ThinkingConfig.IncludeThoughts = true
-
-	stream := t.client.Models.GenerateContentStream(ctx, t.config.ModelName, contents, genContentConfig)
-
-	for chunk, errRange := range stream {
-		if errRange != nil {
-			return nil, fmt.Errorf("stream receive failed: %v", errRange)
-		}
-
-		if len(chunk.Candidates) == 0 {
-			continue
-		}
-
-		for _, candidate := range chunk.Candidates {
-			if candidate.Content != nil {
-				for _, part := range candidate.Content.Parts {
-					if part.Thought {
-						progressBar.SetThinking(true)
-					} else {
-						progressBar.SetThinking(false)
-						if part.Text != "" {
-							responseText += part.Text
-						}
-					}
-				}
-			}
-		}
-	}
-
-	progressBar.SetLoading(false)
-
-	// Parse final response
-	var translatedBatch []srt.SubtitleObject
-	if err = json.Unmarshal([]byte(responseText), &translatedBatch); err != nil {
-		return nil, errors.NewTranslationError("failed to parse response", err).WithContext("response_text", responseText)
+		return nil, err
 	}
 
 	// Validate response content
-	if errValidate := t.validateTranslatedResponse(translatedBatch, batch); errValidate != nil {
+	if errValidate := t.validateTranslatedResponse(response.TranslatedBatch, batch); errValidate != nil {
 		return nil, errValidate
 	}
 
 	// Store successful translation
-	t.translatedBatch = translatedBatch
+	t.translatedBatch = response.TranslatedBatch
 
 	// Process translated lines
 	if err = t.processTranslatedLines(t.translatedBatch, translatedSubtitles, batch); err != nil {
@@ -763,18 +607,7 @@ func (t *Translator) processBatchAttempt(ctx context.Context, batch []srt.Subtit
 
 	t.batchNumber++
 
-	// Build response message for context
-	responseParts := []*genai.Part{{Text: responseText}}
-	return []*genai.Content{
-		{
-			Parts: []*genai.Part{{Text: string(batchData)}},
-			Role:  "user",
-		},
-		{
-			Parts: responseParts,
-			Role:  "model",
-		},
-	}, nil
+	return response.Context, nil
 }
 
 // processTranslatedLines processes the translated subtitle lines
@@ -807,13 +640,13 @@ func (t *Translator) processTranslatedLines(translatedLines []srt.SubtitleObject
 // validateTranslatedResponse validates the translated response content
 func (t *Translator) validateTranslatedResponse(translatedBatch []srt.SubtitleObject, originalBatch []srt.SubtitleObject) error {
 	if len(translatedBatch) != len(originalBatch) {
-		return errors.NewTranslationError(fmt.Sprintf("gemini returned unexpected response. Expected %d lines, got %d", len(originalBatch), len(translatedBatch)), nil).WithContext("expected_count", len(originalBatch)).WithContext("actual_count", len(translatedBatch))
+		return errors.NewTranslationError(fmt.Sprintf("provider returned unexpected response. Expected %d lines, got %d", len(originalBatch), len(translatedBatch)), nil).WithContext("expected_count", len(originalBatch)).WithContext("actual_count", len(translatedBatch))
 	}
 
 	// Check for empty translations
 	for i, translated := range translatedBatch {
 		if translated.Content == "" && originalBatch[i].Content != "" {
-			return errors.NewTranslationError(fmt.Sprintf("gemini returned an empty translation for line %s", translated.Index), nil).WithContext("line_index", translated.Index)
+			return errors.NewTranslationError(fmt.Sprintf("provider returned an empty translation for line %s", translated.Index), nil).WithContext("line_index", translated.Index)
 		}
 	}
 

@@ -96,8 +96,8 @@ func CreateClient(ctx context.Context, cfg *config.Config, apiKey string) (*gena
 	clientConfig := &genai.ClientConfig{
 		APIKey: apiKey,
 	}
-	if cfg.GoogleGeminiBaseURL != "" {
-		clientConfig.HTTPOptions.BaseURL = cfg.GoogleGeminiBaseURL
+	if cfg.BaseURL != "" {
+		clientConfig.HTTPOptions.BaseURL = cfg.BaseURL
 	}
 
 	client, err := genai.NewClient(ctx, clientConfig)

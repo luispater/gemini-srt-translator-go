@@ -26,6 +26,8 @@ var rootCmd = &cobra.Command{
 	Short: "Translate SRT subtitle files using Google Gemini AI",
 	Long: `Gemini SRT Translator is a powerful tool to translate subtitle files using Google Gemini AI.
 Perfect for anyone needing fast, accurate, and customizable translations for videos, movies, and series.`,
+	SilenceUsage:  true, // Don't show usage on errors
+	SilenceErrors: true, // Don't show errors automatically (we handle them in main)
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// Check if no arguments provided, show help
 		if len(args) == 0 {
@@ -42,27 +44,16 @@ func init() {
 
 	// Root command flags (removed input-file flag)
 	rootCmd.Flags().StringVarP(&cfg.TargetLanguage, "target-language", "l", "Simplified Chinese", "Target language for translation")
-	rootCmd.Flags().StringVarP(&cfg.GoogleGeminiBaseURL, "base-url", "", os.Getenv("GOOGLE_GEMINI_BASE_URL"), "Gemini Base URL")
+	rootCmd.Flags().StringVarP(&cfg.Provider, "provider", "p", "gemini", "AI provider (gemini, openai)")
+	rootCmd.Flags().StringVarP(&cfg.BaseURL, "base-url", "", "", "API Base URL (auto-detected based on provider)")
 
 	// Custom handling for comma-separated API keys
 	var apiKeysStr string
-	rootCmd.Flags().StringVarP(&apiKeysStr, "api-key", "k", os.Getenv("GEMINI_API_KEY"), "Gemini API key(s) - comma-separated for multiple keys")
-	rootCmd.PreRun = func(cmd *cobra.Command, args []string) {
-		if apiKeysStr != "" {
-			keys := strings.Split(apiKeysStr, ",")
-			cfg.GeminiAPIKeys = []string{}
-			for _, key := range keys {
-				trimmed := strings.TrimSpace(key)
-				if trimmed != "" {
-					cfg.GeminiAPIKeys = append(cfg.GeminiAPIKeys, trimmed)
-				}
-			}
-		}
-	}
+	rootCmd.Flags().StringVarP(&apiKeysStr, "api-key", "k", "", "API key(s) - comma-separated for multiple keys (auto-detected based on provider)")
 	rootCmd.Flags().StringVarP(&cfg.OutputFile, "output-file", "o", "", "Output file path")
 	rootCmd.Flags().IntVarP(&cfg.StartLine, "start-line", "s", 0, "Starting line number")
 	rootCmd.Flags().StringVarP(&cfg.Description, "description", "d", "", "Description for translation context")
-	rootCmd.Flags().StringVarP(&cfg.ModelName, "model", "m", cfg.ModelName, "Gemini model to use")
+	rootCmd.Flags().StringVarP(&cfg.ModelName, "model", "m", cfg.ModelName, "Model to use (gemini-2.5-pro, gpt-4o, etc.)")
 	rootCmd.Flags().IntVarP(&cfg.BatchSize, "batch-size", "b", cfg.BatchSize, "Batch size for translation")
 	rootCmd.Flags().IntVarP(&cfg.RetryCount, "retry-count", "r", cfg.RetryCount, "Number of retries for failed requests (default: 3)")
 
@@ -89,6 +80,42 @@ func init() {
 
 	// Set flag processing
 	rootCmd.PreRunE = func(cmd *cobra.Command, args []string) error {
+		// Auto-detect provider based on model name if not explicitly set
+		if !cmd.Flags().Changed("provider") {
+			if strings.Contains(cfg.ModelName, "gpt") {
+				cfg.Provider = "openai"
+			} else if strings.Contains(cfg.ModelName, "gemini") {
+				cfg.Provider = "gemini"
+			}
+		}
+
+		// Load environment variables based on final provider
+		cfg.LoadEnvironmentForProvider()
+
+		// Set default model based on provider
+		if !cmd.Flags().Changed("model") {
+			switch cfg.Provider {
+			case "openai":
+				cfg.ModelName = "gpt-4o"
+			case "gemini":
+				cfg.ModelName = "gemini-2.5-pro"
+			}
+		}
+
+		if cmd.Flags().Changed("api-key") {
+			// Override with command line values if provided
+			if apiKeysStr != "" {
+				keys := strings.Split(apiKeysStr, ",")
+				cfg.APIKeys = []string{}
+				for _, key := range keys {
+					trimmed := strings.TrimSpace(key)
+					if trimmed != "" {
+						cfg.APIKeys = append(cfg.APIKeys, trimmed)
+					}
+				}
+			}
+		}
+
 		// Handle temperature
 		if cmd.Flags().Changed("temperature") {
 			cfg.Temperature = &temperature
@@ -143,10 +170,19 @@ func runTranslate(_ *cobra.Command, _ []string) error {
 	logger.SetColorMode(cfg.UseColors)
 	logger.SetQuietMode(cfg.QuietMode)
 
-	// Validate required fields
-	if len(cfg.GeminiAPIKeys) == 0 {
-		apiKey := getAPIKeyFromInput("Enter your Gemini API key: ")
-		cfg.GeminiAPIKeys = []string{apiKey}
+	// Validate required fields based on provider
+	if len(cfg.APIKeys) == 0 {
+		var prompt string
+		switch cfg.Provider {
+		case "openai":
+			prompt = "Enter your OpenAI API key: "
+		case "gemini":
+			fallthrough
+		default:
+			prompt = "Enter your Gemini API key: "
+		}
+		apiKey := getAPIKeyFromInput(prompt)
+		cfg.APIKeys = []string{apiKey}
 	}
 
 	if cfg.TargetLanguage == "" {
@@ -204,6 +240,7 @@ func selectModelInteractive() error {
 
 func getAPIKeyFromInput(prompt string) string {
 	fmt.Print(prompt)
+	//goland:noinspection GoRedundantConversion
 	bytePassword, err := term.ReadPassword(int(syscall.Stdin))
 	if err != nil {
 		logger.Error(fmt.Sprintf("Error reading API key: %v", err))
@@ -242,6 +279,9 @@ func main() {
 					logger.Error(fmt.Sprintf("  %s: %v", key, value))
 				}
 			}
+		} else {
+			// Handle non-structured errors
+			logger.Error(fmt.Sprintf("Error: %v", err))
 		}
 		os.Exit(1)
 	}

@@ -7,10 +7,13 @@ import (
 
 // Config holds all configuration for the translator
 type Config struct {
-	// API configuration
-	GoogleGeminiBaseURL string
-	GeminiAPIKeys       []string
-	TargetLanguage      string
+	// Provider selection
+	Provider string
+
+	// API configuration (unified for all providers)
+	BaseURL        string
+	APIKeys        []string
+	TargetLanguage string
 
 	// File paths
 	InputFile  string
@@ -60,7 +63,9 @@ func parseAPIKeys(envKey string) []string {
 // NewConfig creates a new configuration with default values
 func NewConfig() *Config {
 	return &Config{
-		GeminiAPIKeys:  parseAPIKeys("GEMINI_API_KEY"),
+		Provider:       "gemini",                            // Default to Gemini for backward compatibility
+		APIKeys:        parseAPIKeys("GEMINI_API_KEY"),      // Default to Gemini env var
+		BaseURL:        os.Getenv("GOOGLE_GEMINI_BASE_URL"), // Default to Gemini base URL
 		ModelName:      "gemini-2.5-pro",
 		BatchSize:      300,
 		RetryCount:     3,
@@ -71,5 +76,29 @@ func NewConfig() *Config {
 		UseColors:      true,
 		ProgressLog:    false,
 		QuietMode:      false,
+	}
+}
+
+// LoadEnvironmentForProvider loads environment variables based on the provider
+func (c *Config) LoadEnvironmentForProvider() {
+	switch c.Provider {
+	case "openai":
+		// Load OpenAI environment variables
+		if len(c.APIKeys) == 0 {
+			c.APIKeys = parseAPIKeys("OPENAI_API_KEY")
+		}
+		if c.BaseURL == "" {
+			c.BaseURL = os.Getenv("OPENAI_BASE_URL")
+		}
+	case "gemini":
+		fallthrough
+	default:
+		// Load Gemini environment variables
+		if len(c.APIKeys) == 0 {
+			c.APIKeys = parseAPIKeys("GEMINI_API_KEY")
+		}
+		if c.BaseURL == "" {
+			c.BaseURL = os.Getenv("GOOGLE_GEMINI_BASE_URL")
+		}
 	}
 }
