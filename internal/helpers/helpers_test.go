@@ -206,35 +206,35 @@ func TestGetGenerationConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			config := GetGenerationConfig(tt.temperature, tt.topP, tt.topK)
+			generationConfig := GetGenerationConfig(tt.temperature, tt.topP, tt.topK)
 
 			// Check all expected keys are present
 			for _, key := range tt.wantKeys {
-				if _, exists := config[key]; !exists {
-					t.Errorf("Expected key %q to be present in config", key)
+				if _, exists := generationConfig[key]; !exists {
+					t.Errorf("Expected key %q to be present in generationConfig", key)
 				}
 			}
 
 			// Check specific values
-			if config["response_mime_type"] != "application/json" {
-				t.Errorf("Expected response_mime_type to be 'application/json', got %v", config["response_mime_type"])
+			if generationConfig["response_mime_type"] != "application/json" {
+				t.Errorf("Expected response_mime_type to be 'application/json', got %v", generationConfig["response_mime_type"])
 			}
 
 			if tt.temperature != nil {
-				if config["temperature"] != *tt.temperature {
-					t.Errorf("Expected temperature to be %v, got %v", *tt.temperature, config["temperature"])
+				if generationConfig["temperature"] != *tt.temperature {
+					t.Errorf("Expected temperature to be %v, got %v", *tt.temperature, generationConfig["temperature"])
 				}
 			}
 
 			if tt.topP != nil {
-				if config["top_p"] != *tt.topP {
-					t.Errorf("Expected top_p to be %v, got %v", *tt.topP, config["top_p"])
+				if generationConfig["top_p"] != *tt.topP {
+					t.Errorf("Expected top_p to be %v, got %v", *tt.topP, generationConfig["top_p"])
 				}
 			}
 
 			if tt.topK != nil {
-				if config["top_k"] != *tt.topK {
-					t.Errorf("Expected top_k to be %v, got %v", *tt.topK, config["top_k"])
+				if generationConfig["top_k"] != *tt.topK {
+					t.Errorf("Expected top_k to be %v, got %v", *tt.topK, generationConfig["top_k"])
 				}
 			}
 		})

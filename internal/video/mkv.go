@@ -83,8 +83,8 @@ func (p *MKVParser) Parse() error {
 	// Extract subtitle tracks (with deduplication)
 	seenTracks := make(map[uint8]bool)
 	for i := uint(0); i < numTracks; i++ {
-		trackInfo, err := demuxer.GetTrackInfo(i)
-		if err != nil {
+		trackInfo, errGetTrackInfo := demuxer.GetTrackInfo(i)
+		if errGetTrackInfo != nil {
 			continue // Skip tracks we can't read
 		}
 

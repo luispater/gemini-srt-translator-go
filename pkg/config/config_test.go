@@ -10,14 +10,14 @@ func TestNewConfig(t *testing.T) {
 	originalAPIKey := os.Getenv("GEMINI_API_KEY")
 	defer func() {
 		if originalAPIKey != "" {
-			os.Setenv("GEMINI_API_KEY", originalAPIKey)
+			_ = os.Setenv("GEMINI_API_KEY", originalAPIKey)
 		} else {
-			os.Unsetenv("GEMINI_API_KEY")
+			_ = os.Unsetenv("GEMINI_API_KEY")
 		}
 	}()
 
 	// Test with no API key
-	os.Unsetenv("GEMINI_API_KEY")
+	_ = os.Unsetenv("GEMINI_API_KEY")
 	cfg := NewConfig()
 
 	if len(cfg.APIKeys) != 0 {
@@ -83,11 +83,13 @@ func TestParseAPIKeys(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Set environment variable
 			if tt.envValue != "" {
-				os.Setenv("TEST_API_KEY", tt.envValue)
+				_ = os.Setenv("TEST_API_KEY", tt.envValue)
 			} else {
-				os.Unsetenv("TEST_API_KEY")
+				_ = os.Unsetenv("TEST_API_KEY")
 			}
-			defer os.Unsetenv("TEST_API_KEY")
+			defer func() {
+				_ = os.Unsetenv("TEST_API_KEY")
+			}()
 
 			result := parseAPIKeys("TEST_API_KEY")
 

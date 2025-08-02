@@ -244,9 +244,9 @@ func (g *GeminiProvider) TranslateBatch(ctx context.Context, batch []srt.Subtitl
 		}
 	} else {
 		// Non-streaming mode
-		result, err := g.client.Models.GenerateContent(ctx, config.ModelName, contents, genContentConfig)
-		if err != nil {
-			return nil, fmt.Errorf("generation failed: %v", err)
+		result, errGenerateContent := g.client.Models.GenerateContent(ctx, config.ModelName, contents, genContentConfig)
+		if errGenerateContent != nil {
+			return nil, fmt.Errorf("generation failed: %v", errGenerateContent)
 		}
 
 		if len(result.Candidates) > 0 && result.Candidates[0].Content != nil {
@@ -260,7 +260,7 @@ func (g *GeminiProvider) TranslateBatch(ctx context.Context, batch []srt.Subtitl
 
 	// Parse response
 	var translatedBatch []srt.SubtitleObject
-	if err := json.Unmarshal([]byte(responseText), &translatedBatch); err != nil {
+	if err = json.Unmarshal([]byte(responseText), &translatedBatch); err != nil {
 		return nil, errors.NewTranslationError("failed to parse response", err).WithContext("response_text", responseText)
 	}
 

@@ -41,7 +41,7 @@ func TestTranslatorError_Error(t *testing.T) {
 
 func TestTranslatorError_WithContext(t *testing.T) {
 	err := NewValidationError("test error", nil)
-	err.WithContext("key1", "value1").WithContext("key2", 42)
+	_ = err.WithContext("key1", "value1").WithContext("key2", 42)
 
 	if err.Context["key1"] != "value1" {
 		t.Errorf("Expected context key1 to be 'value1', got %v", err.Context["key1"])
@@ -61,7 +61,7 @@ func TestNewValidationError(t *testing.T) {
 	if err.Message != "validation failed" {
 		t.Errorf("Expected message 'validation failed', got %v", err.Message)
 	}
-	if err.Cause != cause {
+	if !errors.Is(cause, err.Cause) {
 		t.Errorf("Expected cause to be %v, got %v", cause, err.Cause)
 	}
 }

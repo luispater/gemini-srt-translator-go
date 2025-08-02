@@ -53,28 +53,28 @@ func TestSupportsColor(t *testing.T) {
 	originalForceColor := os.Getenv("FORCE_COLOR")
 
 	// Test NO_COLOR set
-	os.Setenv("NO_COLOR", "1")
+	_ = os.Setenv("NO_COLOR", "1")
 	if supportsColor() {
 		t.Error("Expected supportsColor to return false when NO_COLOR is set")
 	}
 
 	// Test FORCE_COLOR set
-	os.Unsetenv("NO_COLOR")
-	os.Setenv("FORCE_COLOR", "1")
+	_ = os.Unsetenv("NO_COLOR")
+	_ = os.Setenv("FORCE_COLOR", "1")
 	if !supportsColor() {
 		t.Error("Expected supportsColor to return true when FORCE_COLOR is set")
 	}
 
 	// Restore original environment
 	if originalNoColor == "" {
-		os.Unsetenv("NO_COLOR")
+		_ = os.Unsetenv("NO_COLOR")
 	} else {
-		os.Setenv("NO_COLOR", originalNoColor)
+		_ = os.Setenv("NO_COLOR", originalNoColor)
 	}
 	if originalForceColor == "" {
-		os.Unsetenv("FORCE_COLOR")
+		_ = os.Unsetenv("FORCE_COLOR")
 	} else {
-		os.Setenv("FORCE_COLOR", originalForceColor)
+		_ = os.Setenv("FORCE_COLOR", originalForceColor)
 	}
 }
 
@@ -182,8 +182,8 @@ func TestGetStoredMessages(t *testing.T) {
 	// Verify it's a copy (modifying returned slice shouldn't affect original)
 	if len(messages) > 0 {
 		messages[0].Message = "modified"
-		originalMessages := GetStoredMessages()
-		if originalMessages[0].Message == "modified" {
+		om := GetStoredMessages()
+		if om[0].Message == "modified" {
 			t.Error("GetStoredMessages should return a copy, not the original slice")
 		}
 	}
@@ -234,7 +234,7 @@ func TestNewProgressBar(t *testing.T) {
 
 func TestProgressBar_Update(t *testing.T) {
 	pb := NewProgressBar(100, "Test")
-	
+
 	// Set quiet mode to avoid output during test
 	originalQuiet := quietMode
 	quietMode = true
@@ -253,7 +253,7 @@ func TestProgressBar_Update(t *testing.T) {
 
 func TestProgressBar_SetSuffix(t *testing.T) {
 	pb := NewProgressBar(100, "Test")
-	
+
 	// Set quiet mode to avoid output during test
 	originalQuiet := quietMode
 	quietMode = true
@@ -268,7 +268,7 @@ func TestProgressBar_SetSuffix(t *testing.T) {
 
 func TestProgressBar_SetLoading(t *testing.T) {
 	pb := NewProgressBar(100, "Test")
-	
+
 	// Set quiet mode to avoid output during test
 	originalQuiet := quietMode
 	quietMode = true
@@ -287,7 +287,7 @@ func TestProgressBar_SetLoading(t *testing.T) {
 
 func TestProgressBar_SetThinking(t *testing.T) {
 	pb := NewProgressBar(100, "Test")
-	
+
 	// Set quiet mode to avoid output during test
 	originalQuiet := quietMode
 	quietMode = true
@@ -306,7 +306,7 @@ func TestProgressBar_SetThinking(t *testing.T) {
 
 func TestProgressBar_SetSending(t *testing.T) {
 	pb := NewProgressBar(100, "Test")
-	
+
 	// Set quiet mode to avoid output during test
 	originalQuiet := quietMode
 	quietMode = true
@@ -325,7 +325,7 @@ func TestProgressBar_SetSending(t *testing.T) {
 
 func TestProgressBar_AddMessage(t *testing.T) {
 	pb := NewProgressBar(100, "Test")
-	
+
 	// Set quiet mode to avoid output during test
 	originalQuiet := quietMode
 	quietMode = true
@@ -348,7 +348,7 @@ func TestProgressBar_AddMessage(t *testing.T) {
 
 func TestProgressBar_ThreadSafety(t *testing.T) {
 	pb := NewProgressBar(1000, "Test")
-	
+
 	// Set quiet mode to avoid output during test
 	originalQuiet := quietMode
 	quietMode = true
@@ -377,8 +377,10 @@ func TestSaveLogsToFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tempFile.Close()
-	defer os.Remove(tempFile.Name())
+	_ = tempFile.Close()
+	defer func() {
+		_ = os.Remove(tempFile.Name())
+	}()
 
 	// Store some test messages
 	logMutex.Lock()
@@ -443,7 +445,7 @@ func TestConstants(t *testing.T) {
 func TestLoggingFunctionsQuietMode(t *testing.T) {
 	// Save original state
 	originalQuiet := quietMode
-	
+
 	// Clear existing messages and enable quiet mode
 	logMutex.Lock()
 	originalMessages := logMessages
@@ -475,7 +477,7 @@ func TestLoggingFunctionsQuietMode(t *testing.T) {
 func TestLoggingFunctionsNormalMode(t *testing.T) {
 	// Save original state
 	originalQuiet := quietMode
-	
+
 	// Clear existing messages
 	logMutex.Lock()
 	originalMessages := logMessages
@@ -486,7 +488,7 @@ func TestLoggingFunctionsNormalMode(t *testing.T) {
 
 	// Call logging functions
 	Info("test info")
-	Warning("test warning") 
+	Warning("test warning")
 	Error("test error")
 	Success("test success")
 	Highlight("test highlight")

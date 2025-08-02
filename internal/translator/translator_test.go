@@ -119,12 +119,14 @@ func TestTranslator_prepareSRTFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() {
+		_ = os.RemoveAll(tempDir)
+	}()
 
 	// Create a test SRT file
 	srtPath := filepath.Join(tempDir, "test.srt")
 	srtContent := "1\n00:00:01,000 --> 00:00:03,000\nTest subtitle\n\n"
-	if err := os.WriteFile(srtPath, []byte(srtContent), 0644); err != nil {
+	if err = os.WriteFile(srtPath, []byte(srtContent), 0644); err != nil {
 		t.Fatalf("Failed to create test SRT file: %v", err)
 	}
 
@@ -156,9 +158,9 @@ func TestTranslator_prepareSRTFile(t *testing.T) {
 				},
 			}
 
-			result, err := translator.prepareSRTFile()
-			if (err != nil) != tt.wantErr {
-				t.Errorf("prepareSRTFile() error = %v, wantErr %v", err, tt.wantErr)
+			result, errPrepareSRTFile := translator.prepareSRTFile()
+			if (errPrepareSRTFile != nil) != tt.wantErr {
+				t.Errorf("prepareSRTFile() error = %v, wantErr %v", errPrepareSRTFile, tt.wantErr)
 				return
 			}
 
@@ -235,7 +237,7 @@ func TestProgressInfo_JSON(t *testing.T) {
 
 	// Test unmarshaling
 	var unmarshaled ProgressInfo
-	if err := json.Unmarshal(data, &unmarshaled); err != nil {
+	if err = json.Unmarshal(data, &unmarshaled); err != nil {
 		t.Fatalf("Failed to unmarshal ProgressInfo: %v", err)
 	}
 
