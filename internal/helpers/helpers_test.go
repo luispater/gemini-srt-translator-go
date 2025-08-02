@@ -251,7 +251,7 @@ func TestCreateClient(t *testing.T) {
 		{
 			name: "valid config with base URL",
 			cfg: &config.Config{
-				GoogleGeminiBaseURL: "https://custom.api.endpoint",
+				BaseURL: "https://custom.api.endpoint",
 			},
 			apiKey:    "test-api-key",
 			wantError: false,

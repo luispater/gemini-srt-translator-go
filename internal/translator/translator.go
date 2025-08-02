@@ -13,8 +13,10 @@ import (
 
 	"github.com/luispater/gemini-srt-translator-go/internal/logger"
 	"github.com/luispater/gemini-srt-translator-go/internal/providers"
+	"github.com/luispater/gemini-srt-translator-go/internal/video"
 	"github.com/luispater/gemini-srt-translator-go/pkg/config"
 	"github.com/luispater/gemini-srt-translator-go/pkg/errors"
+	"github.com/luispater/gemini-srt-translator-go/pkg/languages"
 	"github.com/luispater/gemini-srt-translator-go/pkg/srt"
 )
 
@@ -54,6 +56,8 @@ type Translator struct {
 	logFilePath      string
 	thoughtsFilePath string
 	context          []providers.ContextMessage
+	extractedSRTFile string   // Path to SRT file extracted from MKV
+	cleanupFiles     []string // Files to clean up after translation
 }
 
 // NewTranslator creates a new translator instance
@@ -73,6 +77,12 @@ func NewTranslator(cfg *config.Config) *Translator {
 	outputFile := cfg.OutputFile
 	if outputFile == "" {
 		suffix := "_translated.srt"
+
+		tl := strings.ToLower(cfg.TargetLanguage)
+		if langCode, ok := languages.GetLanguageCode(tl); ok {
+			suffix = "." + langCode + ".srt"
+		}
+
 		if cfg.InputFile == "" {
 			suffix = ".srt"
 		}
@@ -300,15 +310,21 @@ func (t *Translator) getTokenLimit(ctx context.Context) error {
 
 // performTranslation performs the main translation process
 func (t *Translator) performTranslation(ctx context.Context) error {
-	// Read original subtitle file
-	originalData, err := os.ReadFile(t.config.InputFile)
+	// Prepare SRT file (extract from MKV if needed)
+	srtFile, err := t.prepareSRTFile()
 	if err != nil {
-		return errors.NewFileError("failed to read input file", err).WithContext("file_path", t.config.InputFile)
+		return err
+	}
+
+	// Read original subtitle file
+	originalData, err := os.ReadFile(srtFile)
+	if err != nil {
+		return errors.NewFileError("failed to read input file", err).WithContext("file_path", srtFile)
 	}
 
 	originalSubtitles, err := srt.ParseSRT(string(originalData))
 	if err != nil {
-		return errors.NewFileError("failed to parse SRT file", err).WithContext("file_path", t.config.InputFile)
+		return errors.NewFileError("failed to parse SRT file", err).WithContext("file_path", srtFile)
 	}
 
 	// Load or create translated subtitles
@@ -493,6 +509,9 @@ func (t *Translator) performTranslation(ctx context.Context) error {
 		}
 	}
 
+	// Clean up temporary files (e.g., extracted SRT from MKV)
+	t.cleanup()
+
 	return nil
 }
 
@@ -670,4 +689,37 @@ func (t *Translator) isDominantRTL(text string) bool {
 	}
 
 	return rtlCount > ltrCount
+}
+
+// prepareSRTFile prepares the SRT file for translation (extracts from MKV if needed)
+func (t *Translator) prepareSRTFile() (string, error) {
+	inputFile := t.config.InputFile
+
+	// Check if input is an MKV file
+	if strings.HasSuffix(strings.ToLower(inputFile), ".mkv") {
+		logger.Info("MKV file detected. Extracting subtitles...")
+
+		extractedPath, err := video.ExtractSubtitlesFromMKV(inputFile)
+		if err != nil {
+			return "", errors.NewFileError("failed to extract subtitles from MKV file", err).WithContext("mkv_path", inputFile)
+		}
+
+		t.extractedSRTFile = extractedPath
+		t.cleanupFiles = append(t.cleanupFiles, extractedPath)
+
+		logger.Success(fmt.Sprintf("Subtitles extracted to: %s", extractedPath))
+		return extractedPath, nil
+	}
+
+	// For SRT files, return the original path
+	return inputFile, nil
+}
+
+// cleanup removes temporary files created during translation
+func (t *Translator) cleanup() {
+	for _, file := range t.cleanupFiles {
+		if err := os.Remove(file); err != nil && !os.IsNotExist(err) {
+			logger.Warning(fmt.Sprintf("Failed to remove temporary file %s: %v", file, err))
+		}
+	}
 }

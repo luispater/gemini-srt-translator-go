@@ -5,6 +5,7 @@ import (
 	stdErrors "errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -22,9 +23,10 @@ var cfg *config.Config
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
-	Use:   "gst [flags] <SRT_FILE>",
-	Short: "Translate SRT subtitle files using Google Gemini AI",
-	Long: `Gemini SRT Translator is a powerful tool to translate subtitle files using Google Gemini AI.
+	Use:   "gst [flags] <SRT_FILE|MKV_FILE>",
+	Short: "Translate SRT subtitle files or extract and translate subtitles from MKV files using AI",
+	Long: `Gemini SRT Translator is a powerful tool to translate subtitle files using AI providers (Gemini, OpenAI).
+Supports both SRT files and MKV files with embedded subtitles.
 Perfect for anyone needing fast, accurate, and customizable translations for videos, movies, and series.`,
 	SilenceUsage:  true, // Don't show usage on errors
 	SilenceErrors: true, // Don't show errors automatically (we handle them in main)
@@ -191,7 +193,7 @@ func runTranslate(_ *cobra.Command, _ []string) error {
 
 	// Validate file paths
 	if cfg.InputFile != "" {
-		if !validateFilePath(cfg.InputFile, ".srt") {
+		if !validateVideoFilePath(cfg.InputFile) {
 			return errors.NewFileError("invalid input file", nil).WithContext("file_path", cfg.InputFile)
 		}
 	}
@@ -250,18 +252,23 @@ func getAPIKeyFromInput(prompt string) string {
 	return strings.TrimSpace(string(bytePassword))
 }
 
-func validateFilePath(filePath, extension string) bool {
+func validateVideoFilePath(filePath string) bool {
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
 		logger.Error(fmt.Sprintf("File does not exist: %s", filePath))
 		return false
 	}
 
-	if extension != "" && !strings.HasSuffix(strings.ToLower(filePath), extension) {
-		logger.Error(fmt.Sprintf("File must have %s extension: %s", extension, filePath))
-		return false
+	extension := strings.ToLower(filepath.Ext(filePath))
+	supportedExts := []string{".srt", ".mkv"}
+
+	for _, ext := range supportedExts {
+		if extension == ext {
+			return true
+		}
 	}
 
-	return true
+	logger.Error(fmt.Sprintf("File must have .srt or .mkv extension: %s", filePath))
+	return false
 }
 
 func main() {

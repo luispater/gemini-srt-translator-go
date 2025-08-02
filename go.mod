@@ -22,6 +22,7 @@ require (
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/openai/openai-go v1.12.0 // indirect
+	github.com/remko/go-mkvparse v0.14.0 // indirect
 	github.com/spf13/pflag v1.0.7 // indirect
 	github.com/tidwall/gjson v1.14.4 // indirect
 	github.com/tidwall/match v1.1.1 // indirect

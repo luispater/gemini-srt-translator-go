@@ -20,8 +20,8 @@ func TestNewConfig(t *testing.T) {
 	os.Unsetenv("GEMINI_API_KEY")
 	cfg := NewConfig()
 
-	if len(cfg.GeminiAPIKeys) != 0 {
-		t.Errorf("Expected empty API keys, got %v", cfg.GeminiAPIKeys)
+	if len(cfg.APIKeys) != 0 {
+		t.Errorf("Expected empty API keys, got %v", cfg.APIKeys)
 	}
 	if cfg.ModelName != "gemini-2.5-pro" {
 		t.Errorf("Expected model name 'gemini-2.5-pro', got %v", cfg.ModelName)
