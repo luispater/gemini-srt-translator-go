@@ -648,6 +648,8 @@ func (t *Translator) processTranslatedLines(translatedLines []srt.SubtitleObject
 		// Apply RTL detection and formatting
 		if t.isDominantRTL(line.Content) {
 			translatedSubtitles[index].Content = "\u202b" + line.Content + "\u202c"
+		} else if len(line.Content) == 0 {
+			translatedSubtitles[index].Content = " "
 		} else {
 			translatedSubtitles[index].Content = line.Content
 		}
@@ -664,12 +666,27 @@ func (t *Translator) validateTranslatedResponse(translatedBatch []srt.SubtitleOb
 
 	// Check for empty translations
 	for i, translated := range translatedBatch {
-		if translated.Content == "" && originalBatch[i].Content != "" {
+		if translated.Content == "" && originalBatch[i].Content != "" && !t.isOnlyPunctuation(originalBatch[i].Content) {
 			return errors.NewTranslationError(fmt.Sprintf("provider returned an empty translation for line %s", translated.Index), nil).WithContext("line_index", translated.Index)
 		}
 	}
 
 	return nil
+}
+
+// isOnlyPunctuation checks if the text contains only punctuation marks and whitespace
+func (t *Translator) isOnlyPunctuation(text string) bool {
+	if text == "" {
+		return false
+	}
+
+	for _, r := range text {
+		if !unicode.IsPunct(r) && !unicode.IsSpace(r) {
+			return false
+		}
+	}
+
+	return true
 }
 
 // isDominantRTL determines if text is predominantly right-to-left
