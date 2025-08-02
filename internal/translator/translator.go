@@ -249,6 +249,17 @@ func (t *Translator) checkSavedProgress() {
 			if err = os.Remove(t.outputFile); err != nil && !os.IsNotExist(err) {
 				logger.Warning(fmt.Sprintf("Failed to remove output file: %v", err))
 			}
+			// Remove existing progress file
+			if err = os.Remove(t.progressFile); err != nil && !os.IsNotExist(err) {
+				logger.Warning(fmt.Sprintf("Failed to remove progress file: %v", err))
+			}
+			// For MKV files, also remove extracted SRT file when restarting
+			if strings.HasSuffix(strings.ToLower(t.config.InputFile), ".mkv") {
+				extractedPath := t.getExtractedSRTPath()
+				if err = os.Remove(extractedPath); err != nil && !os.IsNotExist(err) {
+					logger.Warning(fmt.Sprintf("Failed to remove extracted SRT file: %v", err))
+				}
+			}
 		}
 	}
 }
@@ -708,24 +719,44 @@ func (t *Translator) isDominantRTL(text string) bool {
 	return rtlCount > ltrCount
 }
 
+// getExtractedSRTPath returns the path where extracted SRT would be saved for an MKV file
+func (t *Translator) getExtractedSRTPath() string {
+	if !strings.HasSuffix(strings.ToLower(t.config.InputFile), ".mkv") {
+		return ""
+	}
+
+	baseName := strings.TrimSuffix(t.config.InputFile, filepath.Ext(t.config.InputFile))
+	return baseName + "_extracted.srt"
+}
+
 // prepareSRTFile prepares the SRT file for translation (extracts from MKV if needed)
 func (t *Translator) prepareSRTFile() (string, error) {
 	inputFile := t.config.InputFile
 
 	// Check if input is an MKV file
 	if strings.HasSuffix(strings.ToLower(inputFile), ".mkv") {
+		extractedPath := t.getExtractedSRTPath()
+
+		// Check if extracted SRT already exists (for resume cases)
+		if _, err := os.Stat(extractedPath); err == nil {
+			logger.Info(fmt.Sprintf("Using existing extracted subtitles: %s", extractedPath))
+			t.extractedSRTFile = extractedPath
+			t.cleanupFiles = append(t.cleanupFiles, extractedPath)
+			return extractedPath, nil
+		}
+
 		logger.Info("MKV file detected. Extracting subtitles...")
 
-		extractedPath, err := video.ExtractSubtitlesFromMKV(inputFile)
+		newExtractedPath, err := video.ExtractSubtitlesFromMKV(inputFile)
 		if err != nil {
 			return "", errors.NewFileError("failed to extract subtitles from MKV file", err).WithContext("mkv_path", inputFile)
 		}
 
-		t.extractedSRTFile = extractedPath
-		t.cleanupFiles = append(t.cleanupFiles, extractedPath)
+		t.extractedSRTFile = newExtractedPath
+		t.cleanupFiles = append(t.cleanupFiles, newExtractedPath)
 
-		logger.Success(fmt.Sprintf("Subtitles extracted to: %s", extractedPath))
-		return extractedPath, nil
+		logger.Success(fmt.Sprintf("Subtitles extracted to: %s", newExtractedPath))
+		return newExtractedPath, nil
 	}
 
 	// For SRT files, return the original path

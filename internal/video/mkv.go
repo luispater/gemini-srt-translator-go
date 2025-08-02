@@ -3,12 +3,13 @@ package video
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/remko/go-mkvparse"
+	"github.com/luispater/gemini-srt-translator-go/pkg/matroska"
 
 	"github.com/luispater/gemini-srt-translator-go/pkg/errors"
 	"github.com/luispater/gemini-srt-translator-go/pkg/srt"
@@ -35,8 +36,6 @@ type SubtitleEntry struct {
 type MKVParser struct {
 	filename      string
 	tracks        []SubtitleTrack
-	currentTrack  *SubtitleTrack
-	trackNumber   int
 	timecodescale uint64
 }
 
@@ -61,10 +60,105 @@ func (p *MKVParser) Parse() error {
 		}
 	}()
 
-	handler := &mkvHandler{parser: p}
+	// Create demuxer
+	demuxer, err := matroska.NewDemuxer(file)
+	if err != nil {
+		return errors.NewFileError("failed to create Matroska demuxer", err)
+	}
+	defer demuxer.Close()
 
-	if errParse := mkvparse.Parse(file, handler); errParse != nil {
-		return errors.NewFileError("failed to parse MKV file", errParse)
+	// Get file info for timecode scale
+	fileInfo, err := demuxer.GetFileInfo()
+	if err != nil {
+		return errors.NewFileError("failed to get file info", err)
+	}
+	p.timecodescale = fileInfo.TimecodeScale
+
+	// Get number of tracks
+	numTracks, err := demuxer.GetNumTracks()
+	if err != nil {
+		return errors.NewFileError("failed to get number of tracks", err)
+	}
+
+	// Extract subtitle tracks (with deduplication)
+	seenTracks := make(map[uint8]bool)
+	for i := uint(0); i < numTracks; i++ {
+		trackInfo, err := demuxer.GetTrackInfo(i)
+		if err != nil {
+			continue // Skip tracks we can't read
+		}
+
+		// Only process subtitle tracks
+		if trackInfo.Type == matroska.TypeSubtitle && strings.HasPrefix(trackInfo.CodecID, "S_TEXT") {
+			// Skip duplicate track numbers
+			if seenTracks[trackInfo.Number] {
+				continue
+			}
+			seenTracks[trackInfo.Number] = true
+
+			track := SubtitleTrack{
+				Number:   int(trackInfo.Number),
+				Language: trackInfo.Language,
+				Name:     trackInfo.Name,
+				Codec:    trackInfo.CodecID,
+				Entries:  []SubtitleEntry{},
+			}
+			p.tracks = append(p.tracks, track)
+		}
+	}
+
+	// Extract subtitle packets
+	err = p.extractSubtitlePackets(demuxer)
+	if err != nil {
+		return errors.NewFileError("failed to extract subtitle packets", err)
+	}
+
+	return nil
+}
+
+// extractSubtitlePackets extracts subtitle packets from the demuxer
+func (p *MKVParser) extractSubtitlePackets(demuxer *matroska.Demuxer) error {
+	// Create a map for quick track lookup
+	trackMap := make(map[uint8]*SubtitleTrack)
+	for i := range p.tracks {
+		trackMap[uint8(p.tracks[i].Number)] = &p.tracks[i]
+	}
+
+	// Read all packets
+	for {
+		packet, err := demuxer.ReadPacket()
+		if err != nil {
+			if err == io.EOF {
+				break // End of file reached
+			}
+			return fmt.Errorf("failed to read packet: %w", err)
+		}
+
+		// Find the corresponding subtitle track
+		track, exists := trackMap[packet.Track]
+		if !exists {
+			continue // Not a subtitle track we're interested in
+		}
+
+		// Convert packet data to text (assuming UTF-8)
+		text := strings.TrimSpace(string(packet.Data))
+		if text == "" {
+			continue // Skip empty packets
+		}
+
+		// Calculate timing using the file's timecode scale
+		startTime := time.Duration(packet.StartTime) * time.Duration(p.timecodescale)
+		endTime := time.Duration(packet.EndTime) * time.Duration(p.timecodescale)
+
+		// Create subtitle entry
+		entry := SubtitleEntry{
+			Start:    startTime,
+			End:      endTime,
+			Text:     text,
+			Duration: endTime - startTime,
+		}
+
+		track.Entries = append(track.Entries, entry)
 	}
 
 	return nil
@@ -201,229 +295,4 @@ func isSDHTrack(name string) bool {
 		strings.Contains(name, "hard of hearing") ||
 		strings.Contains(name, "cc") ||
 		strings.Contains(name, "closed caption")
-}
-
-// mkvHandler implements mkvparse.Handler for parsing MKV files
-type mkvHandler struct {
-	parser       *MKVParser
-	inTracks     bool
-	inTrackEntry bool
-	inCluster    bool
-	inBlock      bool
-	currentBlock *blockInfo
-	clusterTime  uint64
-}
-
-type blockInfo struct {
-	trackNumber int
-	timecode    int16
-	data        []byte
-	duration    uint64
-}
-
-// HandleMasterBegin handles the beginning of master elements
-func (h *mkvHandler) HandleMasterBegin(id mkvparse.ElementID, _ mkvparse.ElementInfo) (bool, error) {
-	switch id {
-	case mkvparse.TracksElement:
-		h.inTracks = true
-	case mkvparse.TrackEntryElement:
-		h.inTrackEntry = true
-		h.parser.currentTrack = &SubtitleTrack{}
-	case mkvparse.ClusterElement:
-		h.inCluster = true
-	case mkvparse.BlockGroupElement, mkvparse.SimpleBlockElement:
-		h.inBlock = true
-		h.currentBlock = &blockInfo{}
-	}
-	return true, nil
-}
-
-// HandleMasterEnd handles the end of master elements
-func (h *mkvHandler) HandleMasterEnd(id mkvparse.ElementID, _ mkvparse.ElementInfo) error {
-	switch id {
-	case mkvparse.TracksElement:
-		h.inTracks = false
-	case mkvparse.TrackEntryElement:
-		h.inTrackEntry = false
-		// Add completed track if it's a subtitle track
-		if h.parser.currentTrack != nil && h.parser.currentTrack.Codec != "" {
-			h.parser.tracks = append(h.parser.tracks, *h.parser.currentTrack)
-		}
-		h.parser.currentTrack = nil
-	case mkvparse.ClusterElement:
-		h.inCluster = false
-	case mkvparse.BlockGroupElement, mkvparse.SimpleBlockElement:
-		h.inBlock = false
-		h.processBlock()
-		h.currentBlock = nil
-	}
-	return nil
-}
-
-// HandleString handles string elements
-func (h *mkvHandler) HandleString(id mkvparse.ElementID, value string, _ mkvparse.ElementInfo) error {
-	if h.inTrackEntry && h.parser.currentTrack != nil {
-		switch id {
-		case mkvparse.CodecIDElement:
-			// Only process subtitle codecs
-			if strings.HasPrefix(value, "S_TEXT") {
-				h.parser.currentTrack.Codec = value
-			}
-		case mkvparse.LanguageElement:
-			h.parser.currentTrack.Language = value
-		case mkvparse.NameElement:
-			h.parser.currentTrack.Name = value
-		}
-	}
-	return nil
-}
-
-// HandleInteger handles integer elements
-func (h *mkvHandler) HandleInteger(id mkvparse.ElementID, value int64, _ mkvparse.ElementInfo) error {
-	switch id {
-	case mkvparse.TimecodeScaleElement:
-		h.parser.timecodescale = uint64(value)
-	case mkvparse.TimecodeElement:
-		if h.inCluster {
-			h.clusterTime = uint64(value)
-		}
-	case mkvparse.TrackNumberElement:
-		if h.inTrackEntry && h.parser.currentTrack != nil {
-			h.parser.currentTrack.Number = int(value)
-		}
-	case mkvparse.TrackTypeElement:
-		// Skip non-subtitle tracks
-		if h.inTrackEntry && h.parser.currentTrack != nil && value != 17 { // 17 is subtitle track type
-			h.parser.currentTrack = nil
-		}
-	case mkvparse.BlockDurationElement:
-		if h.currentBlock != nil {
-			h.currentBlock.duration = uint64(value)
-		}
-	}
-	return nil
-}
-
-// HandleBinary handles binary elements
-func (h *mkvHandler) HandleBinary(id mkvparse.ElementID, value []byte, _ mkvparse.ElementInfo) error {
-	if id == mkvparse.BlockElement || id == mkvparse.SimpleBlockElement {
-		if h.currentBlock != nil {
-			h.parseBlockData(value)
-		}
-	}
-	return nil
-}
-
-// parseBlockData parses block data to extract subtitle information
-func (h *mkvHandler) parseBlockData(data []byte) {
-	if len(data) < 4 {
-		return
-	}
-
-	// Parse track number (variable length)
-	trackNum, offset := parseVariableInt(data)
-	if offset >= len(data) {
-		return
-	}
-
-	// Parse timecode (2 bytes)
-	if offset+2 >= len(data) {
-		return
-	}
-	timecode := int16(data[offset])<<8 | int16(data[offset+1])
-	offset += 2
-
-	// Skip flags (1 byte)
-	if offset+1 >= len(data) {
-		return
-	}
-	offset++
-
-	// Extract payload
-	payload := data[offset:]
-
-	h.currentBlock.trackNumber = int(trackNum)
-	h.currentBlock.timecode = timecode
-	h.currentBlock.data = payload
-}
-
-// processBlock processes a completed block
-func (h *mkvHandler) processBlock() {
-	if h.currentBlock == nil {
-		return
-	}
-
-	// Find the corresponding track
-	var track *SubtitleTrack
-	for i := range h.parser.tracks {
-		if h.parser.tracks[i].Number == h.currentBlock.trackNumber {
-			track = &h.parser.tracks[i]
-			break
-		}
-	}
-
-	if track == nil || track.Codec == "" {
-		return
-	}
-
-	// Calculate timing
-	blockTime := time.Duration(h.clusterTime+uint64(h.currentBlock.timecode)) * time.Duration(h.parser.timecodescale)
-	duration := time.Duration(h.currentBlock.duration) * time.Duration(h.parser.timecodescale)
-
-	// Convert payload to text (assuming UTF-8)
-	text := strings.TrimSpace(string(h.currentBlock.data))
-	if text == "" {
-		return
-	}
-
-	// Create subtitle entry
-	entry := SubtitleEntry{
-		Start:    blockTime,
-		End:      blockTime + duration,
-		Text:     text,
-		Duration: duration,
-	}
-
-	track.Entries = append(track.Entries, entry)
-}
-
-// parseVariableInt parses a variable-length integer as used in EBML
-func parseVariableInt(data []byte) (uint64, int) {
-	if len(data) == 0 {
-		return 0, 0
-	}
-
-	// Find the length by looking at the first bit pattern
-	firstByte := data[0]
-	length := 1
-	mask := uint8(0x80)
-
-	for length <= 8 && (firstByte&mask) == 0 {
-		length++
-		mask >>= 1
-	}
-
-	if length > len(data) || length > 8 {
-		return 0, 0
-	}
-
-	// Extract the value
-	result := uint64(firstByte & (mask - 1))
-	for i := 1; i < length; i++ {
-		result = (result << 8) | uint64(data[i])
-	}
-
-	return result, length
-}
-
-// HandleFloat handles float elements
-func (h *mkvHandler) HandleFloat(_ mkvparse.ElementID, _ float64, _ mkvparse.ElementInfo) error {
-	// Not needed for subtitle extraction
-	return nil
-}
-
-// HandleDate handles date elements
-func (h *mkvHandler) HandleDate(_ mkvparse.ElementID, _ time.Time, _ mkvparse.ElementInfo) error {
-	// Not needed for subtitle extraction
-	return nil
 }
