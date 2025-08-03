@@ -3,13 +3,12 @@ package video
 import (
 	"bufio"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/luispater/gemini-srt-translator-go/pkg/matroska"
+	"github.com/luispater/matroska-go"
 
 	"github.com/luispater/gemini-srt-translator-go/pkg/errors"
 	"github.com/luispater/gemini-srt-translator-go/pkg/srt"
@@ -128,7 +127,7 @@ func (p *MKVParser) extractSubtitlePackets(demuxer *matroska.Demuxer) error {
 	for {
 		packet, err := demuxer.ReadPacket()
 		if err != nil {
-			if err == io.EOF {
+			if strings.Contains(err.Error(), "EOF") {
 				break // End of file reached
 			}
 			return fmt.Errorf("failed to read packet: %w", err)
