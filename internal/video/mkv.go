@@ -3,6 +3,7 @@ package video
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -127,7 +128,7 @@ func (p *MKVParser) extractSubtitlePackets(demuxer *matroska.Demuxer) error {
 	for {
 		packet, err := demuxer.ReadPacket()
 		if err != nil {
-			if strings.Contains(err.Error(), "EOF") {
+			if err == io.EOF || strings.Contains(err.Error(), "EOF") {
 				break // End of file reached
 			}
 			return fmt.Errorf("failed to read packet: %w", err)
@@ -146,8 +147,10 @@ func (p *MKVParser) extractSubtitlePackets(demuxer *matroska.Demuxer) error {
 		}
 
 		// Calculate timing using the file's timecode scale
-		startTime := time.Duration(packet.StartTime) * time.Duration(p.timecodescale)
-		endTime := time.Duration(packet.EndTime) * time.Duration(p.timecodescale)
+		// startTime := time.Duration(packet.StartTime) * time.Duration(p.timecodescale)
+		// endTime := time.Duration(packet.EndTime) * time.Duration(p.timecodescale)
+		startTime := time.Duration(packet.StartTime)
+		endTime := time.Duration(packet.EndTime)
 
 		// Create subtitle entry
 		entry := SubtitleEntry{
