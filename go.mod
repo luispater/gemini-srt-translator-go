@@ -3,7 +3,7 @@ module github.com/luispater/gemini-srt-translator-go
 go 1.24.0
 
 require (
-	github.com/luispater/matroska-go v1.2.2
+	github.com/luispater/matroska-go v1.2.4
 	github.com/openai/openai-go v1.12.0
 	github.com/spf13/cobra v1.9.1
 	golang.org/x/term v0.33.0
