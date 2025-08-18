@@ -6,12 +6,15 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/luispater/matroska-go"
 
+	"github.com/luispater/gemini-srt-translator-go/internal/logger"
 	"github.com/luispater/gemini-srt-translator-go/pkg/errors"
+	"github.com/luispater/gemini-srt-translator-go/pkg/languages"
 	"github.com/luispater/gemini-srt-translator-go/pkg/srt"
 )
 
@@ -265,18 +268,56 @@ func ExtractSubtitlesFromMKV(mkvPath string) (string, error) {
 		return "", err
 	}
 
-	// Select the best English subtitle track
-	track, err := parser.SelectBestEnglishTrack()
-	if err != nil {
-		return "", err
+	tracks := parser.GetSubtitleTracks()
+	if len(tracks) == 0 {
+		return "", errors.NewValidationError("no subtitle tracks found in MKV", nil)
 	}
 
-	// Generate output path
+	logger.Info("Available subtitle tracks:")
+	for i, tr := range tracks {
+		lines := len(tr.Entries)
+		name := strings.TrimSpace(tr.Name)
+		lang := tr.Language
+		bcp := languages.BCP47FromMKV(lang)
+		if bcp != "" {
+			if name != "" {
+				lang = fmt.Sprintf("%s (%s)", bcp, name)
+			} else {
+				lang = fmt.Sprintf("%s", bcp)
+			}
+		}
+		logger.Info(fmt.Sprintf("[%d] Language: %s, Lines:%d", i+1, lang, lines))
+	}
+
+	var selectedIdx int
+	for {
+		input := logger.InputPrompt("Select track number to extract: ")
+		input = strings.TrimSpace(input)
+		if input == "" {
+			best, errSel := parser.SelectBestEnglishTrack()
+			if errSel == nil && best != nil {
+				for i := range tracks {
+					if tracks[i].Number == best.Number {
+						selectedIdx = i
+						break
+					}
+				}
+				break
+			}
+		}
+		if n, errAtoi := strconv.Atoi(input); errAtoi == nil && n >= 1 && n <= len(tracks) {
+			selectedIdx = n - 1
+			break
+		}
+		logger.Warning("Invalid selection. Enter a valid number.")
+	}
+
+	selected := tracks[selectedIdx]
+
 	baseName := strings.TrimSuffix(filepath.Base(mkvPath), filepath.Ext(mkvPath))
 	outputPath := filepath.Join(filepath.Dir(mkvPath), baseName+"_extracted.srt")
 
-	// Extract to SRT
-	if err = parser.ExtractToSRT(track, outputPath); err != nil {
+	if err := parser.ExtractToSRT(&selected, outputPath); err != nil {
 		return "", err
 	}
 

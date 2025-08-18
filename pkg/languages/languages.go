@@ -1,6 +1,5 @@
 package languages
 
-// LanguageMap contains mappings from language names to language codes
 var LanguageMap = map[string]string{
 	// Major World Languages
 	"arabic":     "ar",
@@ -153,4 +152,126 @@ var LanguageMap = map[string]string{
 func GetLanguageCode(languageName string) (string, bool) {
 	code, exists := LanguageMap[languageName]
 	return code, exists
+}
+
+func BCP47FromMKV(code string) string {
+	c := code
+	if c == "" {
+		return "Undetermined"
+	}
+	c = normalize(c)
+	switch c {
+	case "en", "eng":
+		return "English"
+	case "es", "spa":
+		return "Spanish"
+	case "fr", "fre", "fra":
+		return "French"
+	case "de", "ger", "deu":
+		return "German"
+	case "pt", "por":
+		return "Portuguese"
+	case "zh", "zho", "chi", "cmn":
+		return "Chinese"
+	case "ja", "jpn":
+		return "Japanese"
+	case "ko", "kor":
+		return "Korean"
+	case "it", "ita":
+		return "Italian"
+	case "ru", "rus":
+		return "Russian"
+	case "ar", "ara":
+		return "Arabic"
+	case "hi", "hin":
+		return "Hindi"
+	case "nl", "dut", "nld":
+		return "Dutch"
+	case "sv", "swe":
+		return "Swedish"
+	case "pl", "pol":
+		return "Polish"
+	case "tr", "tur":
+		return "Turkish"
+	case "he", "heb":
+		return "Hebrew"
+	case "uk", "ukr":
+		return "Ukrainian"
+	case "cs", "cze", "ces":
+		return "Czech"
+	case "ro", "rum", "ron":
+		return "Romanian"
+	case "vi", "vie":
+		return "Vietnamese"
+	case "th", "tha":
+		return "Thai"
+	case "id", "ind":
+		return "Indonesian"
+	case "fa", "per", "fas":
+		return "Persian"
+	case "el", "gre", "ell":
+		return "Greek"
+	case "hu", "hun":
+		return "Hungarian"
+	case "fi", "fin":
+		return "Finnish"
+	case "no", "nor":
+		return "Norwegian"
+	case "da", "dan":
+		return "Danish"
+	case "bg", "bul":
+		return "Bulgarian"
+	case "sr", "srp":
+		return "Serbian"
+	case "hr", "hrv":
+		return "Croatian"
+	case "sk", "slk", "slo":
+		return "Slovak"
+	case "sl", "slv":
+		return "Slovenian"
+	case "lt", "lit":
+		return "Lithuanian"
+	case "lv", "lav":
+		return "Latvian"
+	case "et", "est":
+		return "Estonian"
+	case "ms", "msa", "may":
+		return "Malay"
+	case "bn", "ben":
+		return "Bengali"
+	case "ur", "urd":
+		return "Urdu"
+	case "ta", "tam":
+		return "Tamil"
+	case "te", "tel":
+		return "Telugu"
+	case "ml", "mal":
+		return "Malayalam"
+	case "mr", "mar":
+		return "Marathi"
+	case "ne", "nep":
+		return "Nepali"
+	case "km", "khm":
+		return "Khmer"
+	case "my", "bur", "mya":
+		return "Burmese"
+	case "bo", "tib":
+		return "Tibetan"
+	case "id-id":
+		return "Indonesian"
+	}
+	return c
+}
+
+func normalize(s string) string {
+	b := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if ch >= 'A' && ch <= 'Z' {
+			b = append(b, ch+32)
+			continue
+		}
+		b = append(b, ch)
+	}
+	return string(b)
 }
