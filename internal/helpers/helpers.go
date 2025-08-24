@@ -26,18 +26,19 @@ You will receive a list of objects, each with these fields:
 %s
 
 Translate the 'content' field of each object.
+You *MUST* return all of translated objects in the response, *MUST NOT* skip any objects. If I send 300 objects, you *MUST* return 300 objects.
 If the 'content' field is empty, leave it as is.
 Preserve line breaks, formatting, and special characters.
-Do NOT move or merge 'content' between objects.
-Do NOT add or remove any objects.
-Do NOT alter the 'index' field.
+You *MUST NOT* move or merge 'content' between objects.
+You *MUST NOT* add or remove any objects.
+You *MUST NOT* alter the 'index' field.
 
 If the target language is *Simplified Chinese*, please forward these instruction:
-Replace all of the "," "." "!" "?" to four spaces.
-Replace all of the \n to four spaces.
-Trim all the invisible characters at the beginning and end of the 'content' field.
-Remove all tags like <i></i>, but keep their content.
-Remove all invisible characters after ":" or "：" in the 'content' field.
+You *MUST* Replace all of the "," "." "!" "?" to four spaces.
+You *MUST* Replace all of the \n to four spaces.
+You *MUST* Trim all the invisible characters at the beginning and end of the 'content' field.
+You *MUST* Remove all tags like <i></i>, but keep their content.
+You *MUST* Remove all invisible characters after ":" or "：" in the 'content' field.
 `, language, fields)
 
 	if thinkingCompatible {
