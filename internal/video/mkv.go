@@ -273,43 +273,49 @@ func ExtractSubtitlesFromMKV(mkvPath string) (string, error) {
 		return "", errors.NewValidationError("no subtitle tracks found in MKV", nil)
 	}
 
-	logger.Info("Available subtitle tracks:")
-	for i, tr := range tracks {
-		lines := len(tr.Entries)
-		name := strings.TrimSpace(tr.Name)
-		lang := tr.Language
-		bcp := languages.BCP47FromMKV(lang)
-		if bcp != "" {
-			if name != "" {
-				lang = fmt.Sprintf("%s (%s)", bcp, name)
-			} else {
-				lang = fmt.Sprintf("%s", bcp)
-			}
-		}
-		logger.Info(fmt.Sprintf("[%d] Language: %s, Lines:%d", i+1, lang, lines))
-	}
-
 	var selectedIdx int
-	for {
-		input := logger.InputPrompt("Select track number to extract: ")
-		input = strings.TrimSpace(input)
-		if input == "" {
-			best, errSel := parser.SelectBestEnglishTrack()
-			if errSel == nil && best != nil {
-				for i := range tracks {
-					if tracks[i].Number == best.Number {
-						selectedIdx = i
-						break
-					}
+	if len(tracks) == 1 {
+		// Only one subtitle track is available; select it automatically
+		logger.Info("Only one subtitle track found; selecting it automatically.")
+		selectedIdx = 0
+	} else {
+		logger.Info("Available subtitle tracks:")
+		for i, tr := range tracks {
+			lines := len(tr.Entries)
+			name := strings.TrimSpace(tr.Name)
+			lang := tr.Language
+			bcp := languages.BCP47FromMKV(lang)
+			if bcp != "" {
+				if name != "" {
+					lang = fmt.Sprintf("%s (%s)", bcp, name)
+				} else {
+					lang = fmt.Sprintf("%s", bcp)
 				}
+			}
+			logger.Info(fmt.Sprintf("[%d] Language: %s, Lines:%d", i+1, lang, lines))
+		}
+
+		for {
+			input := logger.InputPrompt("Select track number to extract: ")
+			input = strings.TrimSpace(input)
+			if input == "" {
+				best, errSel := parser.SelectBestEnglishTrack()
+				if errSel == nil && best != nil {
+					for i := range tracks {
+						if tracks[i].Number == best.Number {
+							selectedIdx = i
+							break
+						}
+					}
+					break
+				}
+			}
+			if n, errAtoi := strconv.Atoi(input); errAtoi == nil && n >= 1 && n <= len(tracks) {
+				selectedIdx = n - 1
 				break
 			}
+			logger.Warning("Invalid selection. Enter a valid number.")
 		}
-		if n, errAtoi := strconv.Atoi(input); errAtoi == nil && n >= 1 && n <= len(tracks) {
-			selectedIdx = n - 1
-			break
-		}
-		logger.Warning("Invalid selection. Enter a valid number.")
 	}
 
 	selected := tracks[selectedIdx]
