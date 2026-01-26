@@ -198,7 +198,7 @@ func (g *GeminiProvider) TranslateBatch(ctx context.Context, batch []srt.Subtitl
 	if config.Thinking {
 		thinkingBudget = int32(config.ThinkingBudget)
 	} else {
-		if strings.Contains(config.ModelName, "gemini-2.5-pro") {
+		if strings.Contains(config.ModelName, "-pro") {
 			thinkingBudget = 128
 		} else {
 			thinkingBudget = 0

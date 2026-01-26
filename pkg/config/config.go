@@ -66,7 +66,7 @@ func NewConfig() *Config {
 		Provider:       "gemini",                            // Default to Gemini for backward compatibility
 		APIKeys:        parseAPIKeys("GEMINI_API_KEY"),      // Default to Gemini env var
 		BaseURL:        os.Getenv("GOOGLE_GEMINI_BASE_URL"), // Default to Gemini base URL
-		ModelName:      "gemini-2.5-pro",
+		ModelName:      "gemini-3-pro-preview",
 		BatchSize:      300,
 		RetryCount:     3,
 		Streaming:      true,
