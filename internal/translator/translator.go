@@ -541,7 +541,7 @@ func (t *Translator) validateTokenSize(ctx context.Context, batch []srt.Subtitle
 	t.tokenCount = tokenCount
 
 	// Check if token count exceeds 90% of limit
-	if float64(tokenCount) > float64(t.tokenLimit)*0.9 {
+	if t.tokenLimit != 0 && float64(tokenCount) > float64(t.tokenLimit)*0.9 {
 		// This is a critical error that requires user input, so we break the progress bar display
 		fmt.Printf("\n\n") // Add some spacing
 		logger.Error(fmt.Sprintf("Token size (%d) exceeds limit (%d) for %s", int(float64(tokenCount)/0.9), t.tokenLimit, t.config.ModelName))
