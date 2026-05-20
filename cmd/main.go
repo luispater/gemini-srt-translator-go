@@ -100,7 +100,7 @@ func init() {
 			case "openai":
 				cfg.ModelName = "gpt-4o"
 			case "gemini":
-				cfg.ModelName = "gemini-3-flash-preview"
+				cfg.ModelName = "gemini-3.5-flash"
 			}
 		}
 

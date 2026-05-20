@@ -66,12 +66,12 @@ func NewConfig() *Config {
 		Provider:       "gemini",                            // Default to Gemini for backward compatibility
 		APIKeys:        parseAPIKeys("GEMINI_API_KEY"),      // Default to Gemini env var
 		BaseURL:        os.Getenv("GOOGLE_GEMINI_BASE_URL"), // Default to Gemini base URL
-		ModelName:      "gemini-3-pro-preview",
+		ModelName:      "gemini-3.5-flash",
 		BatchSize:      300,
 		RetryCount:     3,
 		Streaming:      true,
 		Thinking:       true,
-		ThinkingBudget: 2048,
+		ThinkingBudget: 12800,
 		FreeQuota:      true,
 		UseColors:      true,
 		ProgressLog:    false,
