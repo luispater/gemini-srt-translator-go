@@ -168,15 +168,6 @@ func (g *GeminiProvider) TranslateBatch(ctx context.Context, batch []srt.Subtitl
 
 	// Set generation parameters
 	genConfig := helpers.GetGenerationConfigForBatch(config.Temperature, config.TopP, config.TopK, len(batch))
-	if temp, ok := genConfig["temperature"].(float32); ok {
-		genContentConfig.Temperature = &temp
-	}
-	if topP, ok := genConfig["top_p"].(float32); ok {
-		genContentConfig.TopP = &topP
-	}
-	if topK, ok := genConfig["top_k"].(float32); ok {
-		genContentConfig.TopK = &topK
-	}
 	if mimeType, ok := genConfig["response_mime_type"].(string); ok {
 		genContentConfig.ResponseMIMEType = mimeType
 	}
