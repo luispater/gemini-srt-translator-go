@@ -2,11 +2,16 @@ package helpers
 
 import (
 	"context"
+	_ "embed"
 	"fmt"
+	"strings"
 
 	"github.com/luispater/gemini-srt-translator-go/pkg/config"
 	"google.golang.org/genai"
 )
+
+//go:embed translation_instruction.md
+var instructionTemplate string
 
 // GetInstruction generates the system instruction for the translation model
 func GetInstruction(language string, thinking bool, thinkingCompatible bool, description string) string {
@@ -17,28 +22,7 @@ func GetInstruction(language string, thinking bool, thinkingCompatible bool, des
 		thinkingInstruction = "\nDo NOT think or reason."
 	}
 
-	fields := "- index: an integer translation index\n- content: the text to translate\n"
-
-	instruction := fmt.Sprintf(`You are an assistant that translates subtitles from any language to %s.
-You will receive a list of objects, each with these fields:
-
-%s
-
-Translate the 'content' field of each object.
-You *MUST* return all of translated objects in the response, *MUST NOT* skip any objects. If I send 300 objects, you *MUST* return 300 objects.
-If the 'content' field is empty, leave it as is.
-Preserve line breaks, formatting, and special characters.
-You *MUST NOT* move or merge 'content' between objects.
-You *MUST NOT* add or remove any objects.
-You *MUST NOT* alter the 'index' field.
-
-If the target language is *Simplified Chinese*, please forward these instruction:
-You *MUST* Replace all of the "," "." "!" "?" to four spaces.
-You *MUST* Replace all of the \n to four spaces.
-You *MUST* Trim all the invisible characters at the beginning and end of the 'content' field.
-You *MUST* Remove all tags like <i></i>, but keep their content.
-You *MUST* Remove all invisible characters after ":" or "：" in the 'content' field.
-`, language, fields)
+	instruction := strings.ReplaceAll(instructionTemplate, "{{TARGET_LANGUAGE}}", language)
 
 	if thinkingCompatible {
 		instruction += thinkingInstruction
@@ -51,32 +35,52 @@ You *MUST* Remove all invisible characters after ":" or "：" in the 'content' f
 	return instruction
 }
 
-// GetResponseSchema returns the JSON schema for the translation response
-func GetResponseSchema() map[string]interface{} {
-	return map[string]interface{}{
-		"type": "array",
-		"items": map[string]interface{}{
-			"type": "object",
-			"properties": map[string]interface{}{
-				"index": map[string]interface{}{
-					"type":        "integer",
-					"description": "Translation index",
+// GetResponseSchema returns the response schema for the translation response.
+func GetResponseSchema() *genai.Schema {
+	propertyCount := int64(2)
+	return &genai.Schema{
+		Type: genai.TypeArray,
+		Items: &genai.Schema{
+			Type: genai.TypeObject,
+			Properties: map[string]*genai.Schema{
+				"index": {
+					Type:        genai.TypeInteger,
+					Description: "Translation index",
 				},
-				"content": map[string]interface{}{
-					"type":        "string",
-					"description": "Translated subtitle text",
+				"content": {
+					Type:        genai.TypeString,
+					Description: "Translated subtitle text",
 				},
 			},
-			"required": []string{"index", "content"},
+			Required:         []string{"index", "content"},
+			PropertyOrdering: []string{"index", "content"},
+			MinProperties:    &propertyCount,
+			MaxProperties:    &propertyCount,
 		},
 	}
 }
 
+// GetResponseSchemaForBatch returns the response schema with an exact item count.
+func GetResponseSchemaForBatch(itemCount int) *genai.Schema {
+	schema := GetResponseSchema()
+	if itemCount > 0 {
+		count := int64(itemCount)
+		schema.MinItems = &count
+		schema.MaxItems = &count
+	}
+	return schema
+}
+
 // GetGenerationConfig creates the generation configuration
 func GetGenerationConfig(temperature *float32, topP *float32, topK *float32) map[string]interface{} {
+	return GetGenerationConfigForBatch(temperature, topP, topK, 0)
+}
+
+// GetGenerationConfigForBatch creates the generation configuration for a batch.
+func GetGenerationConfigForBatch(temperature *float32, topP *float32, topK *float32, itemCount int) map[string]interface{} {
 	cfg := map[string]interface{}{
 		"response_mime_type": "application/json",
-		"response_schema":    GetResponseSchema(),
+		"response_schema":    GetResponseSchemaForBatch(itemCount),
 	}
 
 	if temperature != nil {

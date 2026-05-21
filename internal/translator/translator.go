@@ -3,6 +3,7 @@ package translator
 import (
 	"context"
 	"encoding/json"
+	stdErrors "errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -187,8 +188,10 @@ func (t *Translator) validateConfig() error {
 		return errors.NewFileError(fmt.Sprintf("input file %s does not exist", t.config.InputFile), err).WithContext("file_path", t.config.InputFile)
 	}
 
-	if t.config.ThinkingBudget < 0 || t.config.ThinkingBudget > 24576 {
-		return errors.NewConfigurationError("thinking budget must be between 0 and 24576. 0 disables thinking", nil).WithContext("thinking_budget", t.config.ThinkingBudget)
+	switch strings.ToLower(strings.TrimSpace(t.config.ThinkingLevel)) {
+	case "minimal", "low", "medium", "high":
+	default:
+		return errors.NewConfigurationError("thinking level must be one of minimal, low, medium, high", nil).WithContext("thinking_level", t.config.ThinkingLevel)
 	}
 
 	if t.config.Temperature != nil && (*t.config.Temperature < 0 || *t.config.Temperature > 2) {
@@ -569,12 +572,14 @@ func (t *Translator) validateTokenSize(ctx context.Context, batch []srt.Subtitle
 // processBatch processes a single batch of subtitles with retry logic
 func (t *Translator) processBatch(ctx context.Context, batch []srt.SubtitleObject, translatedSubtitles []srt.Subtitle, progressBar *logger.ProgressBar) ([]providers.ContextMessage, error) {
 	var lastErr error
+	retryInstruction := ""
 	progressWrapper := &ProgressBarWrapper{bar: progressBar}
 
 	for attempt := 0; attempt <= t.config.RetryCount; attempt++ {
 		if attempt > 0 {
 			progressBar.PrintErrorAbove(fmt.Sprintf("Retry attempt %d/%d", attempt, t.config.RetryCount), logger.Yellow)
 			progressBar.AddRetry()
+			retryInstruction = t.buildRetryInstruction(lastErr)
 
 			// Try to switch API key if provider supports it
 			if keySwitcher, ok := t.provider.(providers.KeySwitcher); ok {
@@ -587,7 +592,7 @@ func (t *Translator) processBatch(ctx context.Context, batch []srt.SubtitleObjec
 			time.Sleep(time.Duration(attempt) * 2 * time.Second)
 		}
 
-		result, errProcess := t.processBatchAttempt(ctx, batch, translatedSubtitles, progressWrapper)
+		result, errProcess := t.processBatchAttempt(ctx, batch, translatedSubtitles, progressWrapper, retryInstruction)
 		if errProcess == nil {
 			// No need to clear messages anymore - errors stay in terminal history
 			return result, nil
@@ -600,20 +605,72 @@ func (t *Translator) processBatch(ctx context.Context, batch []srt.SubtitleObjec
 	return nil, fmt.Errorf("batch processing failed after %d retries: %w", t.config.RetryCount, lastErr)
 }
 
+// buildRetryInstruction creates correction instructions for the next retry.
+func (t *Translator) buildRetryInstruction(err error) string {
+	if err == nil {
+		return ""
+	}
+
+	var builder strings.Builder
+	builder.WriteString("The previous translation attempt failed. Regenerate the complete response from scratch; do not continue, reuse, or patch the previous invalid response.\n")
+	builder.WriteString(fmt.Sprintf("Previous failure reason: %v\n", err))
+	builder.WriteString("This attempt must return exactly one valid JSON array only; do not return multiple arrays and do not use Markdown code fences.\n")
+	builder.WriteString("The JSON must be directly parseable by Go's json.Unmarshal.\n")
+	builder.WriteString("No content string may contain unescaped literal line breaks, carriage returns, or control characters; replace any line break, carriage return, or source subtitle \\n, \\r, or \\r\\n with four spaces.\n")
+	builder.WriteString("The output object count, order, and index values must exactly match the current input array.\n")
+
+	var translatorErr *errors.TranslatorError
+	if stdErrors.As(err, &translatorErr) {
+		if responseText, ok := translatorErr.Context["response_text"].(string); ok && responseText != "" {
+			builder.WriteString("\nA relevant excerpt from the previous invalid response is shown below. Do not repeat its formatting errors:\n")
+			builder.WriteString(t.responseErrorExcerpt(err, responseText))
+			builder.WriteString("\n")
+		}
+	}
+
+	return builder.String()
+}
+
+// responseErrorExcerpt returns a small escaped excerpt around a JSON parse error.
+func (t *Translator) responseErrorExcerpt(err error, responseText string) string {
+	const excerptRadius = 240
+
+	offset := 0
+	var syntaxErr *json.SyntaxError
+	if stdErrors.As(err, &syntaxErr) && syntaxErr.Offset > 0 {
+		offset = int(syntaxErr.Offset) - 1
+	}
+	if offset < 0 || offset >= len(responseText) {
+		offset = 0
+	}
+
+	start := offset - excerptRadius
+	if start < 0 {
+		start = 0
+	}
+	end := offset + excerptRadius
+	if end > len(responseText) {
+		end = len(responseText)
+	}
+
+	return strconv.Quote(responseText[start:end])
+}
+
 // processBatchAttempt performs a single attempt to process a batch
-func (t *Translator) processBatchAttempt(ctx context.Context, batch []srt.SubtitleObject, translatedSubtitles []srt.Subtitle, progressWrapper *ProgressBarWrapper) ([]providers.ContextMessage, error) {
+func (t *Translator) processBatchAttempt(ctx context.Context, batch []srt.SubtitleObject, translatedSubtitles []srt.Subtitle, progressWrapper *ProgressBarWrapper, retryInstruction string) ([]providers.ContextMessage, error) {
 	// Create translation config
 	translationConfig := &providers.TranslationConfig{
-		ModelName:       t.config.ModelName,
-		TargetLanguage:  t.config.TargetLanguage,
-		Description:     t.config.Description,
-		Temperature:     t.config.Temperature,
-		TopP:            t.config.TopP,
-		TopK:            t.config.TopK,
-		Streaming:       t.config.Streaming,
-		Thinking:        t.config.Thinking,
-		ThinkingBudget:  t.config.ThinkingBudget,
-		ProgressUpdater: progressWrapper,
+		ModelName:        t.config.ModelName,
+		TargetLanguage:   t.config.TargetLanguage,
+		Description:      t.config.Description,
+		RetryInstruction: retryInstruction,
+		Temperature:      t.config.Temperature,
+		TopP:             t.config.TopP,
+		TopK:             t.config.TopK,
+		Streaming:        t.config.Streaming,
+		Thinking:         t.config.Thinking,
+		ThinkingLevel:    t.config.ThinkingLevel,
+		ProgressUpdater:  progressWrapper,
 	}
 
 	// Call provider to translate batch

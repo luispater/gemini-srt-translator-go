@@ -23,8 +23,8 @@ func TestNewConfig(t *testing.T) {
 	if len(cfg.APIKeys) != 0 {
 		t.Errorf("Expected empty API keys, got %v", cfg.APIKeys)
 	}
-	if cfg.ModelName != "gemini-2.5-pro" {
-		t.Errorf("Expected model name 'gemini-2.5-pro', got %v", cfg.ModelName)
+	if cfg.ModelName != "gemini-3.5-flash" {
+		t.Errorf("Expected model name 'gemini-3.5-flash', got %v", cfg.ModelName)
 	}
 	if cfg.BatchSize != 300 {
 		t.Errorf("Expected batch size 300, got %v", cfg.BatchSize)
@@ -35,8 +35,8 @@ func TestNewConfig(t *testing.T) {
 	if !cfg.Thinking {
 		t.Error("Expected thinking to be true")
 	}
-	if cfg.ThinkingBudget != 2048 {
-		t.Errorf("Expected thinking budget 2048, got %v", cfg.ThinkingBudget)
+	if cfg.ThinkingLevel != "high" {
+		t.Errorf("Expected thinking level high, got %v", cfg.ThinkingLevel)
 	}
 	if !cfg.FreeQuota {
 		t.Error("Expected free quota to be true")

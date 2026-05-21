@@ -119,6 +119,9 @@ func (o *OpenAIProvider) TranslateBatch(ctx context.Context, batch []srt.Subtitl
 
 	// Build system instruction
 	instruction := o.getInstruction(config.TargetLanguage, config.Description)
+	if config.RetryInstruction != "" {
+		instruction += "\n\nRetry correction instruction:\n\n" + config.RetryInstruction
+	}
 
 	// Build messages
 	messages := []openai.ChatCompletionMessageParamUnion{
@@ -195,10 +198,11 @@ func (o *OpenAIProvider) TranslateBatch(ctx context.Context, batch []srt.Subtitl
 	}
 
 	// Parse response
-	var translatedBatch []srt.SubtitleObject
-	if err = json.Unmarshal([]byte(responseText), &translatedBatch); err != nil {
-		return nil, errors.NewTranslationError("failed to parse response", err).WithContext("response_text", responseText)
+	translatedBatch, parsedResponseText, errParse := parseTranslatedBatch(responseText)
+	if errParse != nil {
+		return nil, errors.NewTranslationError("failed to parse response", errParse).WithContext("response_text", responseText)
 	}
+	responseText = parsedResponseText
 
 	// Build context for next request
 	newContext := []ContextMessage{

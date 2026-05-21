@@ -7,7 +7,7 @@ require (
 	github.com/openai/openai-go v1.12.0
 	github.com/spf13/cobra v1.9.1
 	golang.org/x/term v0.33.0
-	google.golang.org/genai v1.18.0
+	google.golang.org/genai v1.57.0
 )
 
 require (

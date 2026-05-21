@@ -64,7 +64,7 @@ func init() {
 	rootCmd.Flags().Float32Var(&temperature, "temperature", 1.0, "Temperature (0.0-2.0)")
 	rootCmd.Flags().Float32Var(&topP, "top-p", 0.95, "Top P (0.0-1.0)")
 	rootCmd.Flags().Float32Var(&topK, "top-k", 0, "Top K (>=0)")
-	rootCmd.Flags().IntVar(&cfg.ThinkingBudget, "thinking-budget", cfg.ThinkingBudget, "Thinking budget (0-24576)")
+	rootCmd.Flags().StringVar(&cfg.ThinkingLevel, "thinking-level", cfg.ThinkingLevel, "Thinking level (minimal, low, medium, high)")
 
 	// Boolean flags
 	var noStreaming, noThinking, noColors, progressLog, quiet bool

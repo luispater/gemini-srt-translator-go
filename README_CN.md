@@ -138,7 +138,7 @@ export GEMINI_API_KEY="your_api_key_here"
 - `TopK`: Top-k 采样参数 (>=0)
 - `Streaming`: 启用流式响应 (默认: true)
 - `Thinking`: 启用思考能力 (默认: true)
-- `ThinkingBudget`: 思考过程的令牌预算 (0-24576)
+- `ThinkingLevel`: 思考级别 (minimal, low, medium, high; 默认: high)
 
 ### 用户选项
 

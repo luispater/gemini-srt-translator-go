@@ -138,7 +138,7 @@ Use interactive mode to see and select from available models:
 - `TopK`: Top-k sampling parameter (>=0)
 - `Streaming`: Enable streamed responses (default: true)
 - `Thinking`: Enable thinking capability (default: true)
-- `ThinkingBudget`: Token budget for thinking process (0-24576)
+- `ThinkingLevel`: Thinking level for reasoning (minimal, low, medium, high; default: high)
 
 ### User Options
 

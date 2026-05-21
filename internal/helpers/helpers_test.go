@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/luispater/gemini-srt-translator-go/pkg/config"
+	"google.golang.org/genai"
 )
 
 func TestGetInstruction(t *testing.T) {
@@ -114,55 +115,62 @@ func TestGetResponseSchema(t *testing.T) {
 	schema := GetResponseSchema()
 
 	// Check top-level structure
-	if schema["type"] != "array" {
-		t.Errorf("Expected schema type to be 'array', got %v", schema["type"])
+	if schema.Type != genai.TypeArray {
+		t.Errorf("Expected schema type to be ARRAY, got %v", schema.Type)
 	}
 
 	// Check items structure
-	items, ok := schema["items"].(map[string]interface{})
-	if !ok {
-		t.Fatal("Expected items to be a map")
+	if schema.Items == nil {
+		t.Fatal("Expected items to be set")
 	}
+	items := schema.Items
 
-	if items["type"] != "object" {
-		t.Errorf("Expected items type to be 'object', got %v", items["type"])
+	if items.Type != genai.TypeObject {
+		t.Errorf("Expected items type to be OBJECT, got %v", items.Type)
+	}
+	if items.MinProperties == nil || *items.MinProperties != 2 {
+		t.Errorf("Expected minProperties to be 2, got %v", items.MinProperties)
+	}
+	if items.MaxProperties == nil || *items.MaxProperties != 2 {
+		t.Errorf("Expected maxProperties to be 2, got %v", items.MaxProperties)
+	}
+	propertyOrdering := items.PropertyOrdering
+	if len(propertyOrdering) != 2 || propertyOrdering[0] != "index" || propertyOrdering[1] != "content" {
+		t.Errorf("Expected propertyOrdering to be [index content], got %v", propertyOrdering)
 	}
 
 	// Check properties
-	properties, ok := items["properties"].(map[string]interface{})
-	if !ok {
-		t.Fatal("Expected properties to be a map")
+	properties := items.Properties
+	if properties == nil {
+		t.Fatal("Expected properties to be set")
 	}
 
 	// Check index property
-	indexProp, ok := properties["index"].(map[string]interface{})
+	indexProp, ok := properties["index"]
 	if !ok {
 		t.Fatal("Expected index property to exist")
 	}
-	if indexProp["type"] != "integer" {
-		t.Errorf("Expected index type to be 'integer', got %v", indexProp["type"])
+	if indexProp.Type != genai.TypeInteger {
+		t.Errorf("Expected index type to be INTEGER, got %v", indexProp.Type)
 	}
-	if indexProp["description"] != "Translation index" {
-		t.Errorf("Expected index description to be 'Translation index', got %v", indexProp["description"])
+	if indexProp.Description != "Translation index" {
+		t.Errorf("Expected index description to be 'Translation index', got %v", indexProp.Description)
 	}
 
 	// Check content property
-	contentProp, ok := properties["content"].(map[string]interface{})
+	contentProp, ok := properties["content"]
 	if !ok {
 		t.Fatal("Expected content property to exist")
 	}
-	if contentProp["type"] != "string" {
-		t.Errorf("Expected content type to be 'string', got %v", contentProp["type"])
+	if contentProp.Type != genai.TypeString {
+		t.Errorf("Expected content type to be STRING, got %v", contentProp.Type)
 	}
-	if contentProp["description"] != "Translated subtitle text" {
-		t.Errorf("Expected content description to be 'Translated subtitle text', got %v", contentProp["description"])
+	if contentProp.Description != "Translated subtitle text" {
+		t.Errorf("Expected content description to be 'Translated subtitle text', got %v", contentProp.Description)
 	}
 
 	// Check required fields
-	required, ok := items["required"].([]string)
-	if !ok {
-		t.Fatal("Expected required to be a string slice")
-	}
+	required := items.Required
 	if len(required) != 2 {
 		t.Errorf("Expected 2 required fields, got %d", len(required))
 	}
@@ -171,6 +179,17 @@ func TestGetResponseSchema(t *testing.T) {
 	}
 	if !contains(required, "content") {
 		t.Error("Expected 'content' to be required")
+	}
+}
+
+func TestGetResponseSchemaForBatch(t *testing.T) {
+	schema := GetResponseSchemaForBatch(300)
+
+	if schema.MinItems == nil || *schema.MinItems != 300 {
+		t.Errorf("Expected minItems to be 300, got %v", schema.MinItems)
+	}
+	if schema.MaxItems == nil || *schema.MaxItems != 300 {
+		t.Errorf("Expected maxItems to be 300, got %v", schema.MaxItems)
 	}
 }
 

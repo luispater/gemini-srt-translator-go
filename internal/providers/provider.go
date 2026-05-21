@@ -33,16 +33,17 @@ type ContextMessage struct {
 
 // TranslationConfig holds configuration for translation request
 type TranslationConfig struct {
-	ModelName       string
-	TargetLanguage  string
-	Description     string
-	Temperature     *float32
-	TopP            *float32
-	TopK            *float32
-	Streaming       bool
-	Thinking        bool
-	ThinkingBudget  int
-	ProgressUpdater ProgressUpdater
+	ModelName        string
+	TargetLanguage   string
+	Description      string
+	RetryInstruction string
+	Temperature      *float32
+	TopP             *float32
+	TopK             *float32
+	Streaming        bool
+	Thinking         bool
+	ThinkingLevel    string
+	ProgressUpdater  ProgressUpdater
 }
 
 // TranslationResponse holds the response from translation

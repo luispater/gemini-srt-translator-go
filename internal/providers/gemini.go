@@ -36,6 +36,22 @@ func (g *GeminiProvider) GetName() string {
 	return "gemini"
 }
 
+// parseThinkingLevel converts configuration values to Gemini SDK thinking levels.
+func parseThinkingLevel(level string) genai.ThinkingLevel {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "minimal":
+		return genai.ThinkingLevelMinimal
+	case "low":
+		return genai.ThinkingLevelLow
+	case "medium":
+		return genai.ThinkingLevelMedium
+	case "high":
+		return genai.ThinkingLevelHigh
+	default:
+		return genai.ThinkingLevelHigh
+	}
+}
+
 // getCurrentAPIKey returns the current API key if available
 func (g *GeminiProvider) getCurrentAPIKey() string {
 	if len(g.apiKeys) == 0 || g.currentAPIIndex >= len(g.apiKeys) {
@@ -96,13 +112,16 @@ func (g *GeminiProvider) TranslateBatch(ctx context.Context, batch []srt.Subtitl
 	}
 
 	// Create generation config
-	thinkingCompatible := strings.Contains(config.ModelName, "2.5")
+	thinkingCompatible := strings.Contains(config.ModelName, "2.5") || strings.Contains(config.ModelName, "gemini-3")
 	instruction := helpers.GetInstruction(
 		config.TargetLanguage,
 		config.Thinking,
 		thinkingCompatible,
 		config.Description,
 	)
+	if config.RetryInstruction != "" {
+		instruction += "\n\nRetry correction instruction:\n\n" + config.RetryInstruction
+	}
 
 	// Build content parts
 	batchData, err := json.Marshal(batch)
@@ -120,13 +139,6 @@ func (g *GeminiProvider) TranslateBatch(ctx context.Context, batch []srt.Subtitl
 
 	// Build conversation history
 	var contents []*genai.Content
-
-	// Add system instruction as first message
-	systemContent := &genai.Content{
-		Parts: []*genai.Part{{Text: instruction}},
-		Role:  "model",
-	}
-	contents = append(contents, systemContent)
 
 	// Add previous context
 	if len(previousContext) > 0 {
@@ -155,7 +167,7 @@ func (g *GeminiProvider) TranslateBatch(ctx context.Context, batch []srt.Subtitl
 	}
 
 	// Set generation parameters
-	genConfig := helpers.GetGenerationConfig(config.Temperature, config.TopP, config.TopK)
+	genConfig := helpers.GetGenerationConfigForBatch(config.Temperature, config.TopP, config.TopK, len(batch))
 	if temp, ok := genConfig["temperature"].(float32); ok {
 		genContentConfig.Temperature = &temp
 	}
@@ -168,50 +180,19 @@ func (g *GeminiProvider) TranslateBatch(ctx context.Context, batch []srt.Subtitl
 	if mimeType, ok := genConfig["response_mime_type"].(string); ok {
 		genContentConfig.ResponseMIMEType = mimeType
 	}
-	if schema, hasSchema := genConfig["response_schema"].(map[string]interface{}); hasSchema {
-		// Convert schema to genai.Schema
-		jsonSchema := &genai.Schema{
-			Type: genai.Type(schema["type"].(string)),
-		}
-		if items, hasItems := schema["items"].(map[string]interface{}); hasItems {
-			jsonSchema.Items = &genai.Schema{
-				Type: genai.Type(items["type"].(string)),
-			}
-			if props, hasProps := items["properties"].(map[string]interface{}); hasProps {
-				jsonSchema.Items.Properties = make(map[string]*genai.Schema)
-				for key, prop := range props {
-					if propMap, isPropMap := prop.(map[string]interface{}); isPropMap {
-						propertySchema := &genai.Schema{
-							Type: genai.Type(propMap["type"].(string)),
-						}
-						if description, hasDescription := propMap["description"].(string); hasDescription {
-							propertySchema.Description = description
-						}
-						jsonSchema.Items.Properties[key] = propertySchema
-					}
-				}
-			}
-			if required, hasRequired := items["required"].([]string); hasRequired {
-				jsonSchema.Items.Required = required
-			}
-		}
-		genContentConfig.ResponseSchema = jsonSchema
+	if schema, hasSchema := genConfig["response_schema"].(*genai.Schema); hasSchema {
+		genContentConfig.ResponseSchema = schema
 	}
 
-	var thinkingBudget int32
-	if config.Thinking {
-		thinkingBudget = int32(config.ThinkingBudget)
-	} else {
-		if strings.Contains(config.ModelName, "-pro") {
-			thinkingBudget = 128
-		} else {
-			thinkingBudget = 0
-		}
-	}
 	genContentConfig.MaxOutputTokens = 65536
-	genContentConfig.ThinkingConfig = &genai.ThinkingConfig{}
-	genContentConfig.ThinkingConfig.ThinkingBudget = &thinkingBudget
-	genContentConfig.ThinkingConfig.IncludeThoughts = true
+	thinkingLevel := parseThinkingLevel(config.ThinkingLevel)
+	if !config.Thinking {
+		thinkingLevel = genai.ThinkingLevelMinimal
+	}
+	genContentConfig.ThinkingConfig = &genai.ThinkingConfig{
+		ThinkingLevel:   thinkingLevel,
+		IncludeThoughts: config.Thinking,
+	}
 
 	var responseText string
 
@@ -263,10 +244,11 @@ func (g *GeminiProvider) TranslateBatch(ctx context.Context, batch []srt.Subtitl
 	}
 
 	// Parse response
-	var translatedBatch []srt.SubtitleObject
-	if err = json.Unmarshal([]byte(responseText), &translatedBatch); err != nil {
-		return nil, errors.NewTranslationError("failed to parse response", err).WithContext("response_text", responseText)
+	translatedBatch, parsedResponseText, errParse := parseTranslatedBatch(responseText)
+	if errParse != nil {
+		return nil, errors.NewTranslationError("failed to parse response", errParse).WithContext("response_text", responseText)
 	}
+	responseText = parsedResponseText
 
 	// Build context for next request
 	newContext := []ContextMessage{
