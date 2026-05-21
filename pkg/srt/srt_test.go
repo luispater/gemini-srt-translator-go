@@ -236,11 +236,11 @@ func TestParseTimestamp(t *testing.T) {
 
 func TestParseDuration_Errors(t *testing.T) {
 	tests := []string{
-		"1:2",           // Not enough parts
-		"a:b:c",         // Invalid hours
-		"1:b:c",         // Invalid minutes
-		"1:2:c",         // Invalid seconds
-		"1:2:3:4",       // Too many parts
+		"1:2",     // Not enough parts
+		"a:b:c",   // Invalid hours
+		"1:b:c",   // Invalid minutes
+		"1:2:c",   // Invalid seconds
+		"1:2:3:4", // Too many parts
 	}
 
 	for _, input := range tests {
@@ -296,16 +296,16 @@ func TestComposeSRT_MultilineContent(t *testing.T) {
 func TestSubtitleObject(t *testing.T) {
 	timeStart := "00:00:01,000"
 	timeEnd := "00:00:04,000"
-	
+
 	obj := SubtitleObject{
-		Index:     "1",
+		Index:     1,
 		Content:   "Test content",
 		TimeStart: &timeStart,
 		TimeEnd:   &timeEnd,
 	}
 
-	if obj.Index != "1" {
-		t.Errorf("Expected index '1', got %q", obj.Index)
+	if obj.Index != 1 {
+		t.Errorf("Expected index 1, got %d", obj.Index)
 	}
 	if obj.Content != "Test content" {
 		t.Errorf("Expected content 'Test content', got %q", obj.Content)
@@ -321,10 +321,10 @@ func TestSubtitleObject(t *testing.T) {
 func TestComposeSRTObject(t *testing.T) {
 	startTime := "00:00:01,000"
 	endTime := "00:00:04,000"
-	
+
 	objects := []SubtitleObject{
 		{
-			Index:     "1",
+			Index:     1,
 			Content:   "Hello world!",
 			TimeStart: &startTime,
 			TimeEnd:   &endTime,
@@ -344,16 +344,16 @@ func TestComposeSRTObject_Multiple(t *testing.T) {
 	endTime1 := "00:00:04,000"
 	startTime2 := "00:00:05,000"
 	endTime2 := "00:00:08,000"
-	
+
 	objects := []SubtitleObject{
 		{
-			Index:     "1",
+			Index:     1,
 			Content:   "First subtitle",
 			TimeStart: &startTime1,
 			TimeEnd:   &endTime1,
 		},
 		{
-			Index:     "2",
+			Index:     2,
 			Content:   "Second subtitle",
 			TimeStart: &startTime2,
 			TimeEnd:   &endTime2,
@@ -452,7 +452,7 @@ func TestFormatDuration_EdgeCases(t *testing.T) {
 		{
 			name:     "fractional milliseconds",
 			duration: 1500 * time.Microsecond, // 1.5 milliseconds
-			expected: "00:00:00,001",         // Should round to 1ms
+			expected: "00:00:00,001",          // Should round to 1ms
 		},
 	}
 

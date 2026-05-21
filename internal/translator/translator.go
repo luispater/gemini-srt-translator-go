@@ -418,12 +418,12 @@ func (t *Translator) performTranslation(ctx context.Context) error {
 
 		for j := startIdx; j < t.config.StartLine-1; j++ {
 			objUser := srt.SubtitleObject{
-				Index:   strconv.Itoa(j),
+				Index:   j,
 				Content: originalSubtitles[j].Content,
 			}
 
 			objModel := srt.SubtitleObject{
-				Index:   strconv.Itoa(j),
+				Index:   j,
 				Content: translatedSubtitles[j].Content,
 			}
 
@@ -444,7 +444,7 @@ func (t *Translator) performTranslation(ctx context.Context) error {
 
 	// Add first subtitle to batch
 	obj := srt.SubtitleObject{
-		Index:   strconv.Itoa(i),
+		Index:   i,
 		Content: originalSubtitles[i].Content,
 	}
 	batch = append(batch, obj)
@@ -458,7 +458,7 @@ func (t *Translator) performTranslation(ctx context.Context) error {
 		// Build batch
 		for i < total && len(batch) < t.config.BatchSize {
 			subtitleObj := srt.SubtitleObject{
-				Index:   strconv.Itoa(i),
+				Index:   i,
 				Content: originalSubtitles[i].Content,
 			}
 			batch = append(batch, subtitleObj)
@@ -643,18 +643,14 @@ func (t *Translator) processBatchAttempt(ctx context.Context, batch []srt.Subtit
 // processTranslatedLines processes the translated subtitle lines
 func (t *Translator) processTranslatedLines(translatedLines []srt.SubtitleObject, translatedSubtitles []srt.Subtitle, batch []srt.SubtitleObject) error {
 	// Create index map from batch
-	indexMap := make(map[string]int)
+	indexMap := make(map[int]int)
 	for i, item := range batch {
 		indexMap[item.Index] = i
 	}
 
 	// Process each translated line
 	for _, line := range translatedLines {
-		// Parse index
-		index, err := strconv.Atoi(line.Index)
-		if err != nil {
-			return errors.NewValidationError(fmt.Sprintf("invalid index: %s", line.Index), err).WithContext("line_index", line.Index)
-		}
+		index := line.Index
 
 		// Apply RTL detection and formatting
 		if t.isDominantRTL(line.Content) {
@@ -678,7 +674,7 @@ func (t *Translator) validateTranslatedResponse(translatedBatch []srt.SubtitleOb
 	// Check for empty translations
 	for i, translated := range translatedBatch {
 		if translated.Content == "" && originalBatch[i].Content != "" && !t.isOnlyPunctuation(originalBatch[i].Content) {
-			return errors.NewTranslationError(fmt.Sprintf("provider returned an empty translation for line %s", translated.Index), nil).WithContext("line_index", translated.Index)
+			return errors.NewTranslationError(fmt.Sprintf("provider returned an empty translation for line %d", translated.Index), nil).WithContext("line_index", translated.Index)
 		}
 	}
 

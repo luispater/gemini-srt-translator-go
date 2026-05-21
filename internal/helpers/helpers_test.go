@@ -27,7 +27,7 @@ func TestGetInstruction(t *testing.T) {
 			wantContains: []string{
 				"translates subtitles from any language to French",
 				"Do NOT think or reason",
-				"index: a string identifier",
+				"index: an integer translation index",
 				"content: the text to translate",
 			},
 			wantNotContains: []string{
@@ -139,8 +139,11 @@ func TestGetResponseSchema(t *testing.T) {
 	if !ok {
 		t.Fatal("Expected index property to exist")
 	}
-	if indexProp["type"] != "string" {
-		t.Errorf("Expected index type to be 'string', got %v", indexProp["type"])
+	if indexProp["type"] != "integer" {
+		t.Errorf("Expected index type to be 'integer', got %v", indexProp["type"])
+	}
+	if indexProp["description"] != "Translation index" {
+		t.Errorf("Expected index description to be 'Translation index', got %v", indexProp["description"])
 	}
 
 	// Check content property
@@ -150,6 +153,9 @@ func TestGetResponseSchema(t *testing.T) {
 	}
 	if contentProp["type"] != "string" {
 		t.Errorf("Expected content type to be 'string', got %v", contentProp["type"])
+	}
+	if contentProp["description"] != "Translated subtitle text" {
+		t.Errorf("Expected content description to be 'Translated subtitle text', got %v", contentProp["description"])
 	}
 
 	// Check required fields

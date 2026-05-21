@@ -181,9 +181,13 @@ func (g *GeminiProvider) TranslateBatch(ctx context.Context, batch []srt.Subtitl
 				jsonSchema.Items.Properties = make(map[string]*genai.Schema)
 				for key, prop := range props {
 					if propMap, isPropMap := prop.(map[string]interface{}); isPropMap {
-						jsonSchema.Items.Properties[key] = &genai.Schema{
+						propertySchema := &genai.Schema{
 							Type: genai.Type(propMap["type"].(string)),
 						}
+						if description, hasDescription := propMap["description"].(string); hasDescription {
+							propertySchema.Description = description
+						}
+						jsonSchema.Items.Properties[key] = propertySchema
 					}
 				}
 			}

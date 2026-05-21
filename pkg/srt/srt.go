@@ -18,7 +18,7 @@ type Subtitle struct {
 
 // SubtitleObject represents the object structure used for translation
 type SubtitleObject struct {
-	Index     string  `json:"index"`
+	Index     int     `json:"index"`
 	Content   string  `json:"content"`
 	TimeStart *string `json:"time_start,omitempty"`
 	TimeEnd   *string `json:"time_end,omitempty"`
@@ -151,7 +151,7 @@ func ComposeSRTObject(subtitles []SubtitleObject) string {
 	var parts []string
 
 	for _, sub := range subtitles {
-		block := fmt.Sprintf("%s\n%s --> %s\n%s",
+		block := fmt.Sprintf("%d\n%s --> %s\n%s",
 			sub.Index,
 			*sub.TimeStart,
 			*sub.TimeEnd,

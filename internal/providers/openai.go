@@ -214,7 +214,7 @@ func (o *OpenAIProvider) TranslateBatch(ctx context.Context, batch []srt.Subtitl
 
 // getInstruction generates the system instruction for OpenAI translation
 func (o *OpenAIProvider) getInstruction(language string, description string) string {
-	fields := "- index: a string identifier\n- content: the text to translate\n"
+	fields := "- index: an integer translation index\n- content: the text to translate\n"
 
 	instruction := fmt.Sprintf(`You are an assistant that translates subtitles from any language to %s.
 You will receive a list of objects, each with these fields:

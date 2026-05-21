@@ -17,7 +17,7 @@ func GetInstruction(language string, thinking bool, thinkingCompatible bool, des
 		thinkingInstruction = "\nDo NOT think or reason."
 	}
 
-	fields := "- index: a string identifier\n- content: the text to translate\n"
+	fields := "- index: an integer translation index\n- content: the text to translate\n"
 
 	instruction := fmt.Sprintf(`You are an assistant that translates subtitles from any language to %s.
 You will receive a list of objects, each with these fields:
@@ -59,10 +59,12 @@ func GetResponseSchema() map[string]interface{} {
 			"type": "object",
 			"properties": map[string]interface{}{
 				"index": map[string]interface{}{
-					"type": "string",
+					"type":        "integer",
+					"description": "Translation index",
 				},
 				"content": map[string]interface{}{
-					"type": "string",
+					"type":        "string",
+					"description": "Translated subtitle text",
 				},
 			},
 			"required": []string{"index", "content"},
