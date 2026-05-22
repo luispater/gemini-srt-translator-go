@@ -71,7 +71,7 @@ func NewConfig() *Config {
 		RetryCount:    3,
 		Streaming:     true,
 		Thinking:      true,
-		ThinkingLevel: "high",
+		ThinkingLevel: "minimal",
 		FreeQuota:     true,
 		UseColors:     true,
 		ProgressLog:   false,

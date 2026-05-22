@@ -422,12 +422,14 @@ func (t *Translator) performTranslation(ctx context.Context) error {
 		for j := startIdx; j < t.config.StartLine-1; j++ {
 			objUser := srt.SubtitleObject{
 				Index:   j,
-				Content: originalSubtitles[j].Content,
+				Content: normalizeSubtitleContentForModel(originalSubtitles[j].Content),
+				Guard:   t.lineGuard(j),
 			}
 
 			objModel := srt.SubtitleObject{
 				Index:   j,
-				Content: translatedSubtitles[j].Content,
+				Content: normalizeSubtitleContentForModel(translatedSubtitles[j].Content),
+				Guard:   t.lineGuard(j),
 			}
 
 			userBatch = append(userBatch, objUser)
@@ -469,7 +471,8 @@ func (t *Translator) performTranslation(ctx context.Context) error {
 		}
 
 		// Validate token size
-		if err = t.validateTokenSize(ctx, batch); err != nil {
+		guardedBatch := t.withLineGuards(batch)
+		if err = t.validateTokenSize(ctx, guardedBatch); err != nil {
 			return err
 		}
 
@@ -479,7 +482,7 @@ func (t *Translator) performTranslation(ctx context.Context) error {
 
 		// Process batch
 		startTime := time.Now()
-		newContext, errProcessBatch := t.processBatch(ctx, batch, translatedSubtitles, progressBar)
+		newContext, errProcessBatch := t.processBatch(ctx, guardedBatch, translatedSubtitles, progressBar)
 		if errProcessBatch != nil {
 			return errProcessBatch
 		}
@@ -569,6 +572,32 @@ func (t *Translator) validateTokenSize(ctx context.Context, batch []srt.Subtitle
 	return nil
 }
 
+// withLineGuards returns a copy of the batch prepared for model input.
+func (t *Translator) withLineGuards(batch []srt.SubtitleObject) []srt.SubtitleObject {
+	guardedBatch := make([]srt.SubtitleObject, len(batch))
+	for i, item := range batch {
+		item.Content = normalizeSubtitleContentForModel(item.Content)
+		item.Guard = t.lineGuard(item.Index)
+		guardedBatch[i] = item
+	}
+	return guardedBatch
+}
+
+// normalizeSubtitleContentForModel keeps one subtitle object as one text unit.
+func normalizeSubtitleContentForModel(content string) string {
+	replacer := strings.NewReplacer(
+		"\r\n", "    ",
+		"\n", "    ",
+		"\r", "    ",
+	)
+	return replacer.Replace(content)
+}
+
+// lineGuard returns the expected guard token for a subtitle index.
+func (t *Translator) lineGuard(index int) string {
+	return fmt.Sprintf("GST_LINE_%06d", index)
+}
+
 // processBatch processes a single batch of subtitles with retry logic
 func (t *Translator) processBatch(ctx context.Context, batch []srt.SubtitleObject, translatedSubtitles []srt.Subtitle, progressBar *logger.ProgressBar) ([]providers.ContextMessage, error) {
 	var lastErr error
@@ -617,7 +646,9 @@ func (t *Translator) buildRetryInstruction(err error) string {
 	builder.WriteString("This attempt must return exactly one valid JSON array only; do not return multiple arrays and do not use Markdown code fences.\n")
 	builder.WriteString("The JSON must be directly parseable by Go's json.Unmarshal.\n")
 	builder.WriteString("No content string may contain unescaped literal line breaks, carriage returns, or control characters; replace any line break, carriage return, or source subtitle \\n, \\r, or \\r\\n with four spaces.\n")
-	builder.WriteString("The output object count, order, and index values must exactly match the current input array.\n")
+	builder.WriteString("Treat each input object as one complete subtitle unit. Do not split one content value into multiple output objects because it contains escaped line separators, visual line breaks, or multiple short phrases.\n")
+	builder.WriteString("The output object count, order, index values, and guard values must exactly match the current input array.\n")
+	builder.WriteString("Copy each guard value unchanged. Do not translate, remove, rename, or move guard values between objects.\n")
 
 	var translatorErr *errors.TranslatorError
 	if stdErrors.As(err, &translatorErr) {
@@ -728,9 +759,15 @@ func (t *Translator) validateTranslatedResponse(translatedBatch []srt.SubtitleOb
 		return errors.NewTranslationError(fmt.Sprintf("provider returned unexpected response. Expected %d lines, got %d", len(originalBatch), len(translatedBatch)), nil).WithContext("expected_count", len(originalBatch)).WithContext("actual_count", len(translatedBatch))
 	}
 
-	// Check for empty translations
 	for i, translated := range translatedBatch {
-		if translated.Content == "" && originalBatch[i].Content != "" && !t.isOnlyPunctuation(originalBatch[i].Content) {
+		original := originalBatch[i]
+		if translated.Index != original.Index {
+			return errors.NewTranslationError(fmt.Sprintf("provider returned mismatched index at position %d. Expected %d, got %d", i, original.Index, translated.Index), nil).WithContext("position", i).WithContext("expected_index", original.Index).WithContext("actual_index", translated.Index)
+		}
+		if original.Guard != "" && translated.Guard != original.Guard {
+			return errors.NewTranslationError(fmt.Sprintf("provider returned mismatched guard for line %d", original.Index), nil).WithContext("line_index", original.Index).WithContext("expected_guard", original.Guard).WithContext("actual_guard", translated.Guard)
+		}
+		if translated.Content == "" && original.Content != "" && !t.isOnlyPunctuation(original.Content) {
 			return errors.NewTranslationError(fmt.Sprintf("provider returned an empty translation for line %d", translated.Index), nil).WithContext("line_index", translated.Index)
 		}
 	}

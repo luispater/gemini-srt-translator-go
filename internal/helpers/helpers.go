@@ -37,7 +37,7 @@ func GetInstruction(language string, thinking bool, thinkingCompatible bool, des
 
 // GetResponseSchema returns the response schema for the translation response.
 func GetResponseSchema() *genai.Schema {
-	propertyCount := int64(2)
+	propertyCount := int64(3)
 	return &genai.Schema{
 		Type: genai.TypeArray,
 		Items: &genai.Schema{
@@ -51,9 +51,13 @@ func GetResponseSchema() *genai.Schema {
 					Type:        genai.TypeString,
 					Description: "Translated subtitle text",
 				},
+				"guard": {
+					Type:        genai.TypeString,
+					Description: "Line guard token copied unchanged from the input object",
+				},
 			},
-			Required:         []string{"index", "content"},
-			PropertyOrdering: []string{"index", "content"},
+			Required:         []string{"index", "content", "guard"},
+			PropertyOrdering: []string{"index", "content", "guard"},
 			MinProperties:    &propertyCount,
 			MaxProperties:    &propertyCount,
 		},

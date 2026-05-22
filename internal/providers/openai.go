@@ -218,7 +218,7 @@ func (o *OpenAIProvider) TranslateBatch(ctx context.Context, batch []srt.Subtitl
 
 // getInstruction generates the system instruction for OpenAI translation
 func (o *OpenAIProvider) getInstruction(language string, description string) string {
-	fields := "- index: an integer translation index\n- content: the text to translate\n"
+	fields := "- index: an integer translation index\n- content: the text to translate\n- guard: a line guard token that must be copied unchanged\n"
 
 	instruction := fmt.Sprintf(`You are an assistant that translates subtitles from any language to %s.
 You will receive a list of objects, each with these fields:
@@ -226,17 +226,21 @@ You will receive a list of objects, each with these fields:
 %s
 
 Translate the 'content' field of each object.
+Copy the 'guard' field of each object exactly as received.
 If the 'content' field is empty, leave it as is.
-Preserve line breaks, formatting, and special characters.
+Preserve the original meaning, formatting intent, and special characters, but do not emit literal line breaks in JSON strings.
+Each input object represents one complete subtitle; even if its 'content' appears to contain \n, \r\n, \r, or multiple visual lines, translate it as one object.
 Do NOT move or merge 'content' between objects.
+Do NOT split one object's 'content' into multiple output objects.
 Do NOT add or remove any objects.
 Do NOT alter the 'index' field.
+Do NOT alter, translate, remove, or move the 'guard' field.
 
 Return the result as a JSON array with the same structure.
 
 If the target language is *Simplified Chinese*, please follow these instructions:
 Replace all of the "," "." "!" "?" to four spaces.
-Replace all of the \n to four spaces.
+Replace all of the \n, \r, \r\n, and literal line breaks to four spaces.
 Trim all the invisible characters at the beginning and end of the 'content' field.
 Remove all tags like <i></i>, but keep their content.
 Remove all invisible characters after ":" or "：" in the 'content' field.

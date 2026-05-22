@@ -173,6 +173,40 @@ func TestTranslator_prepareSRTFile(t *testing.T) {
 	}
 }
 
+func TestTranslator_validateTranslatedResponseRejectsMismatchedIndex(t *testing.T) {
+	translator := &Translator{}
+	originalBatch := []srt.SubtitleObject{
+		{Index: 305, Content: "With Rob-Will...", Guard: "GST_LINE_000305"},
+		{Index: 306, Content: "that night.", Guard: "GST_LINE_000306"},
+	}
+	translatedBatch := []srt.SubtitleObject{
+		{Index: 305, Content: "和罗布-威尔在一起", Guard: "GST_LINE_000305"},
+		{Index: 307, Content: "那晚", Guard: "GST_LINE_000306"},
+	}
+
+	err := translator.validateTranslatedResponse(translatedBatch, originalBatch)
+	if err == nil {
+		t.Fatal("Expected mismatched index to be rejected")
+	}
+}
+
+func TestTranslator_validateTranslatedResponseRejectsMismatchedGuard(t *testing.T) {
+	translator := &Translator{}
+	originalBatch := []srt.SubtitleObject{
+		{Index: 305, Content: "With Rob-Will...", Guard: "GST_LINE_000305"},
+		{Index: 306, Content: "that night.", Guard: "GST_LINE_000306"},
+	}
+	translatedBatch := []srt.SubtitleObject{
+		{Index: 305, Content: "和罗布-威尔在一起    那晚", Guard: "GST_LINE_000306"},
+		{Index: 306, Content: "现在我们达成共识了", Guard: "GST_LINE_000307"},
+	}
+
+	err := translator.validateTranslatedResponse(translatedBatch, originalBatch)
+	if err == nil {
+		t.Fatal("Expected mismatched guard to be rejected")
+	}
+}
+
 func TestTranslator_isDominantRTL(t *testing.T) {
 	translator := &Translator{}
 

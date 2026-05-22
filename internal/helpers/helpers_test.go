@@ -128,15 +128,15 @@ func TestGetResponseSchema(t *testing.T) {
 	if items.Type != genai.TypeObject {
 		t.Errorf("Expected items type to be OBJECT, got %v", items.Type)
 	}
-	if items.MinProperties == nil || *items.MinProperties != 2 {
-		t.Errorf("Expected minProperties to be 2, got %v", items.MinProperties)
+	if items.MinProperties == nil || *items.MinProperties != 3 {
+		t.Errorf("Expected minProperties to be 3, got %v", items.MinProperties)
 	}
-	if items.MaxProperties == nil || *items.MaxProperties != 2 {
-		t.Errorf("Expected maxProperties to be 2, got %v", items.MaxProperties)
+	if items.MaxProperties == nil || *items.MaxProperties != 3 {
+		t.Errorf("Expected maxProperties to be 3, got %v", items.MaxProperties)
 	}
 	propertyOrdering := items.PropertyOrdering
-	if len(propertyOrdering) != 2 || propertyOrdering[0] != "index" || propertyOrdering[1] != "content" {
-		t.Errorf("Expected propertyOrdering to be [index content], got %v", propertyOrdering)
+	if len(propertyOrdering) != 3 || propertyOrdering[0] != "index" || propertyOrdering[1] != "content" || propertyOrdering[2] != "guard" {
+		t.Errorf("Expected propertyOrdering to be [index content guard], got %v", propertyOrdering)
 	}
 
 	// Check properties
@@ -169,16 +169,31 @@ func TestGetResponseSchema(t *testing.T) {
 		t.Errorf("Expected content description to be 'Translated subtitle text', got %v", contentProp.Description)
 	}
 
+	// Check guard property
+	guardProp, ok := properties["guard"]
+	if !ok {
+		t.Fatal("Expected guard property to exist")
+	}
+	if guardProp.Type != genai.TypeString {
+		t.Errorf("Expected guard type to be STRING, got %v", guardProp.Type)
+	}
+	if guardProp.Description != "Line guard token copied unchanged from the input object" {
+		t.Errorf("Expected guard description to match, got %v", guardProp.Description)
+	}
+
 	// Check required fields
 	required := items.Required
-	if len(required) != 2 {
-		t.Errorf("Expected 2 required fields, got %d", len(required))
+	if len(required) != 3 {
+		t.Errorf("Expected 3 required fields, got %d", len(required))
 	}
 	if !contains(required, "index") {
 		t.Error("Expected 'index' to be required")
 	}
 	if !contains(required, "content") {
 		t.Error("Expected 'content' to be required")
+	}
+	if !contains(required, "guard") {
+		t.Error("Expected 'guard' to be required")
 	}
 }
 

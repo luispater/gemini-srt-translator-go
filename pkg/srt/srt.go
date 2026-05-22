@@ -20,6 +20,7 @@ type Subtitle struct {
 type SubtitleObject struct {
 	Index     int     `json:"index"`
 	Content   string  `json:"content"`
+	Guard     string  `json:"guard,omitempty"`
 	TimeStart *string `json:"time_start,omitempty"`
 	TimeEnd   *string `json:"time_end,omitempty"`
 }
