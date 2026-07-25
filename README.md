@@ -10,6 +10,8 @@ Gemini SRT Translator Go - a powerful tool to translate subtitle files using Goo
 - ⏱️ **Timing & Format**: Maintains exact timestamps and basic SRT formatting of the original file
 - 💾 **Quick Resume**: Easily resume interrupted translations from where you left off
 - 🧠 **Advanced AI**: Leverages thinking and reasoning capabilities for more contextually accurate translations
+- 🔌 **Multiple Protocols**: Supports Gemini, OpenAI Chat Completions, and OpenAI Responses
+- 🛠️ **Structured Responses Translation**: Uses function tools to read subtitle batches and submit translations while preserving reasoning context and encrypted reasoning signatures
 - 🖥️ **CLI Support**: Full command-line interface for easy automation and scripting
 - ⚙️ **Customizable**: Tune model parameters, adjust batch size, and access other advanced settings
 - 📜 **Description Support**: Add description to guide AI in using specific terminology or context
@@ -93,6 +95,14 @@ export GEMINI_API_KEY="your_api_key_here"
 
 # Suppress output
 ./gst subtitle.srt -l "Simplified Chinese" --quiet
+
+# Use OpenAI Responses with structured tool calls
+export OPENAI_API_KEY="your_openai_api_key"
+./gst subtitle.srt \
+  --provider openai \
+  --openai-protocol responses \
+  --model gpt-5 \
+  -l "Simplified Chinese"
 ```
 
 #### Advanced Options
@@ -132,7 +142,8 @@ Use interactive mode to see and select from available models:
 
 ### Model Parameters
 
-- `ModelName`: Gemini model to use (default: "gemini-2.5-flash")
+- `ModelName`: Model to use
+- `OpenAIProtocol`: OpenAI protocol (`chat-completions` or `responses`; default: `chat-completions`)
 - `Temperature`: Controls randomness in output (0.0-2.0)
 - `TopP`: Nucleus sampling parameter (0.0-1.0)
 - `TopK`: Top-k sampling parameter (>=0)

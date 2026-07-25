@@ -10,6 +10,8 @@ Gemini SRT Translator Go - 一个使用 Google Gemini AI 翻译字幕文件的�
 - ⏱️ **时间和格式**: 保持原始文件的精确时间戳和基本的 SRT 格式
 - 💾 **快速恢复**: 轻松从上次中断的地方恢复翻译
 - 🧠 **高级 AI**: 利用思考和推理能力，实现更符合上下文的准确翻译
+- 🔌 **多协议支持**: 支持 Gemini、OpenAI Chat Completions 和 OpenAI Responses
+- 🛠️ **结构化 Responses 翻译**: 通过函数工具读取字幕批次并提交译文，同时保留推理上下文及加密思考签名
 - 🖥️ **CLI 支持**: 功能齐全的命令行界面，便于自动化和脚本编写
 - ⚙️ **可定制**: 可调整模型参数、批量大小，并可访问其他高级设置
 - 📜 **描述支持**: 添加描述以指导 AI 使用特定的术语或上下文
@@ -93,6 +95,14 @@ export GEMINI_API_KEY="your_api_key_here"
 
 # 禁止输出
 ./gst subtitle.srt -l "Simplified Chinese" --quiet
+
+# 使用 OpenAI Responses 结构化工具调用
+export OPENAI_API_KEY="your_openai_api_key"
+./gst subtitle.srt \
+  --provider openai \
+  --openai-protocol responses \
+  --model gpt-5 \
+  -l "Simplified Chinese"
 ```
 
 #### 高级选项
@@ -132,7 +142,8 @@ export GEMINI_API_KEY="your_api_key_here"
 
 ### 模型参数
 
-- `ModelName`: 要使用的 Gemini 模型 (默认: "gemini-2.5-flash")
+- `ModelName`: 要使用的模型
+- `OpenAIProtocol`: OpenAI 协议（`chat-completions` 或 `responses`；默认：`chat-completions`）
 - `Temperature`: 控制输出的随机性 (0.0-2.0)
 - `TopP`: Nucleus 采样参数 (0.0-1.0)
 - `TopK`: Top-k 采样参数 (>=0)

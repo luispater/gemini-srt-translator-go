@@ -8,7 +8,8 @@ import (
 // Config holds all configuration for the translator
 type Config struct {
 	// Provider selection
-	Provider string
+	Provider       string
+	OpenAIProtocol string
 
 	// API configuration (unified for all providers)
 	BaseURL        string
@@ -26,13 +27,14 @@ type Config struct {
 	RetryCount  int
 
 	// Model configuration
-	ModelName     string
-	Streaming     bool
-	Thinking      bool
-	ThinkingLevel string
-	Temperature   *float32
-	TopP          *float32
-	TopK          *float32
+	ModelName            string
+	OpenAIPromptCacheKey string
+	Streaming            bool
+	Thinking             bool
+	ThinkingLevel        string
+	Temperature          *float32
+	TopP                 *float32
+	TopK                 *float32
 
 	// User options
 	FreeQuota   bool
@@ -63,19 +65,20 @@ func parseAPIKeys(envKey string) []string {
 // NewConfig creates a new configuration with default values
 func NewConfig() *Config {
 	return &Config{
-		Provider:      "gemini",                            // Default to Gemini for backward compatibility
-		APIKeys:       parseAPIKeys("GEMINI_API_KEY"),      // Default to Gemini env var
-		BaseURL:       os.Getenv("GOOGLE_GEMINI_BASE_URL"), // Default to Gemini base URL
-		ModelName:     "gemini-3.5-flash",
-		BatchSize:     300,
-		RetryCount:    3,
-		Streaming:     true,
-		Thinking:      true,
-		ThinkingLevel: "high",
-		FreeQuota:     true,
-		UseColors:     true,
-		ProgressLog:   false,
-		QuietMode:     false,
+		Provider:       "gemini",                            // Default to Gemini for backward compatibility
+		OpenAIProtocol: "chat-completions",                  // Preserve the existing OpenAI behavior by default
+		APIKeys:        parseAPIKeys("GEMINI_API_KEY"),      // Default to Gemini env var
+		BaseURL:        os.Getenv("GOOGLE_GEMINI_BASE_URL"), // Default to Gemini base URL
+		ModelName:      "gemini-3.5-flash",
+		BatchSize:      300,
+		RetryCount:     3,
+		Streaming:      true,
+		Thinking:       true,
+		ThinkingLevel:  "high",
+		FreeQuota:      true,
+		UseColors:      true,
+		ProgressLog:    false,
+		QuietMode:      false,
 	}
 }
 

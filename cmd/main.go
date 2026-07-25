@@ -47,6 +47,7 @@ func init() {
 	// Root command flags (removed input-file flag)
 	rootCmd.Flags().StringVarP(&cfg.TargetLanguage, "target-language", "l", "Simplified Chinese", "Target language for translation")
 	rootCmd.Flags().StringVarP(&cfg.Provider, "provider", "p", "gemini", "AI provider (gemini, openai)")
+	rootCmd.Flags().StringVar(&cfg.OpenAIProtocol, "openai-protocol", cfg.OpenAIProtocol, "OpenAI API protocol (chat-completions, responses)")
 	rootCmd.Flags().StringVarP(&cfg.BaseURL, "base-url", "", "", "API Base URL (auto-detected based on provider)")
 
 	// Custom handling for comma-separated API keys
@@ -96,12 +97,7 @@ func init() {
 
 		// Set default model based on provider
 		if !cmd.Flags().Changed("model") {
-			switch cfg.Provider {
-			case "openai":
-				cfg.ModelName = "gpt-4o"
-			case "gemini":
-				cfg.ModelName = "gemini-3.5-flash"
-			}
+			cfg.ModelName = defaultModelForProvider(cfg.Provider, cfg.OpenAIProtocol)
 		}
 
 		if cmd.Flags().Changed("api-key") {
@@ -165,6 +161,16 @@ func init() {
 		return nil
 	}
 
+}
+
+func defaultModelForProvider(provider string, openAIProtocol string) string {
+	if strings.EqualFold(strings.TrimSpace(provider), "openai") {
+		if strings.EqualFold(strings.TrimSpace(openAIProtocol), "responses") {
+			return "gpt-5"
+		}
+		return "gpt-4o"
+	}
+	return "gemini-3.5-flash"
 }
 
 func runTranslate(_ *cobra.Command, _ []string) error {

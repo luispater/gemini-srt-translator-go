@@ -2,6 +2,8 @@ package translator
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	stdErrors "errors"
 	"fmt"
@@ -23,8 +25,25 @@ import (
 
 // ProgressInfo stores information about translation progress
 type ProgressInfo struct {
-	Line      int    `json:"line"`
-	InputFile string `json:"input_file"`
+	Line                   int                        `json:"line"`
+	InputFile              string                     `json:"input_file"`
+	Provider               string                     `json:"provider,omitempty"`
+	Protocol               string                     `json:"protocol,omitempty"`
+	Model                  string                     `json:"model,omitempty"`
+	TranslationFingerprint string                     `json:"translation_fingerprint,omitempty"`
+	PromptCacheKey         string                     `json:"prompt_cache_key,omitempty"`
+	Context                []providers.ContextMessage `json:"context,omitempty"`
+}
+
+type progressTranslationConfig struct {
+	BaseURL        string   `json:"base_url"`
+	TargetLanguage string   `json:"target_language"`
+	Description    string   `json:"description"`
+	Thinking       bool     `json:"thinking"`
+	ThinkingLevel  string   `json:"thinking_level"`
+	Temperature    *float32 `json:"temperature"`
+	TopP           *float32 `json:"top_p"`
+	TopK           *float32 `json:"top_k"`
 }
 
 // ProgressBar wrapper to implement ProgressUpdater interface
@@ -63,6 +82,12 @@ type Translator struct {
 
 // NewTranslator creates a new translator instance
 func NewTranslator(cfg *config.Config) *Translator {
+	if strings.EqualFold(strings.TrimSpace(cfg.Provider), "openai") &&
+		strings.EqualFold(strings.TrimSpace(cfg.OpenAIProtocol), "responses") {
+		// A newly constructed translator represents a new task unless progress restores the previous key.
+		cfg.OpenAIPromptCacheKey = ""
+	}
+
 	baseFile := cfg.InputFile
 
 	var baseName, dirPath string
@@ -137,26 +162,31 @@ func (t *Translator) GetModels(ctx context.Context) ([]string, error) {
 // Translate performs the main translation process
 func (t *Translator) Translate(ctx context.Context) error {
 	// Validate prerequisites
-	if err := t.validatePrerequisites(); err != nil {
-		return err
+	if errValidatePrerequisites := t.validatePrerequisites(); errValidatePrerequisites != nil {
+		return errValidatePrerequisites
 	}
 
 	// Validate configuration
-	if err := t.validateConfig(); err != nil {
-		return err
+	if errValidateConfig := t.validateConfig(); errValidateConfig != nil {
+		return errValidateConfig
 	}
 
 	// Check saved progress
 	t.checkSavedProgress()
 
+	// Initialize provider task state before model validation or translation requests.
+	if errInitialize := t.initializeTranslationTask(); errInitialize != nil {
+		return errInitialize
+	}
+
 	// Validate model availability
-	if err := t.validateModel(ctx); err != nil {
-		return err
+	if errValidateModel := t.validateModel(ctx); errValidateModel != nil {
+		return errValidateModel
 	}
 
 	// Get token limit
-	if err := t.getTokenLimit(ctx); err != nil {
-		return err
+	if errGetTokenLimit := t.getTokenLimit(ctx); errGetTokenLimit != nil {
+		return errGetTokenLimit
 	}
 
 	// Perform translation
@@ -184,8 +214,16 @@ func (t *Translator) validateConfig() error {
 	if t.config.InputFile == "" {
 		return errors.NewValidationError("please provide a subtitle file", nil)
 	}
-	if _, err := os.Stat(t.config.InputFile); os.IsNotExist(err) {
-		return errors.NewFileError(fmt.Sprintf("input file %s does not exist", t.config.InputFile), err).WithContext("file_path", t.config.InputFile)
+	if _, errStatInput := os.Stat(t.config.InputFile); os.IsNotExist(errStatInput) {
+		return errors.NewFileError(fmt.Sprintf("input file %s does not exist", t.config.InputFile), errStatInput).WithContext("file_path", t.config.InputFile)
+	}
+
+	if t.config.Provider == "openai" {
+		switch strings.ToLower(strings.TrimSpace(t.config.OpenAIProtocol)) {
+		case "", "chat-completions", "responses":
+		default:
+			return errors.NewConfigurationError("OpenAI protocol must be one of chat-completions, responses", nil).WithContext("openai_protocol", t.config.OpenAIProtocol)
+		}
 	}
 
 	switch strings.ToLower(strings.TrimSpace(t.config.ThinkingLevel)) {
@@ -209,30 +247,35 @@ func (t *Translator) validateConfig() error {
 	return nil
 }
 
-// checkSavedProgress checks for saved progress and asks user to resume
+// checkSavedProgress checks for saved progress and asks user to resume.
 func (t *Translator) checkSavedProgress() {
 	if t.progressFile == "" || t.config.StartLine != 0 {
 		return
 	}
 
-	data, err := os.ReadFile(t.progressFile)
-	if err != nil {
+	data, errRead := os.ReadFile(t.progressFile)
+	if errRead != nil {
 		return
 	}
 
 	var progress ProgressInfo
-	if err = json.Unmarshal(data, &progress); err != nil {
-		logger.Warning(fmt.Sprintf("Error reading progress file: %v", err))
+	if errUnmarshal := json.Unmarshal(data, &progress); errUnmarshal != nil {
+		logger.Warning(fmt.Sprintf("Error reading progress file: %v", errUnmarshal))
 		return
 	}
 
-	// Verify the progress file matches our current input file
+	// Verify the progress file matches our current input file.
 	if progress.InputFile != t.config.InputFile {
 		logger.Warning(fmt.Sprintf("Found progress file for different subtitle: %s", progress.InputFile))
 		logger.Warning("Ignoring saved progress.")
 		return
 	}
+	if progress.Line < 1 {
+		logger.Warning("Ignoring saved progress with an invalid line number.")
+		return
+	}
 
+	shouldResume := true
 	if progress.Line > 1 {
 		var resume string
 		if t.config.Resume == nil {
@@ -242,57 +285,173 @@ func (t *Translator) checkSavedProgress() {
 		} else {
 			resume = "n"
 		}
+		shouldResume = resume == "y" || resume == "yes"
+	} else if t.config.Resume != nil && !*t.config.Resume {
+		shouldResume = false
+	}
 
-		if resume == "y" || resume == "yes" {
+	if shouldResume {
+		if progress.Line > 1 {
 			logger.Info(fmt.Sprintf("Resuming from line %d", progress.Line))
-			t.config.StartLine = progress.Line
-		} else {
-			logger.Info("Starting from the beginning")
-			// Remove the existing output file
-			if err = os.Remove(t.outputFile); err != nil && !os.IsNotExist(err) {
-				logger.Warning(fmt.Sprintf("Failed to remove output file: %v", err))
-			}
-			// Remove existing progress file
-			if err = os.Remove(t.progressFile); err != nil && !os.IsNotExist(err) {
-				logger.Warning(fmt.Sprintf("Failed to remove progress file: %v", err))
-			}
-			// For MKV files, also remove extracted SRT file when restarting
-			if strings.HasSuffix(strings.ToLower(t.config.InputFile), ".mkv") {
-				extractedPath := t.getExtractedSRTPath()
-				if err = os.Remove(extractedPath); err != nil && !os.IsNotExist(err) {
-					logger.Warning(fmt.Sprintf("Failed to remove extracted SRT file: %v", err))
-				}
-			}
+		}
+		t.config.StartLine = progress.Line
+		if t.usesOpenAIResponses() && t.progressContextMatches(progress) {
+			t.context = append([]providers.ContextMessage(nil), progress.Context...)
+			t.config.OpenAIPromptCacheKey = progress.PromptCacheKey
+		} else if t.usesOpenAIResponses() && (progress.PromptCacheKey != "" || len(progress.Context) > 0) {
+			logger.Warning("Saved Responses progress does not match the current provider, protocol, model, or translation configuration. Ignoring saved context and prompt cache key.")
+		}
+		return
+	}
+
+	logger.Info("Starting from the beginning")
+	if t.usesOpenAIResponses() {
+		t.config.OpenAIPromptCacheKey = ""
+	}
+	// Remove the existing output file.
+	if errRemoveOutput := os.Remove(t.outputFile); errRemoveOutput != nil && !os.IsNotExist(errRemoveOutput) {
+		logger.Warning(fmt.Sprintf("Failed to remove output file: %v", errRemoveOutput))
+	}
+	// Remove the existing progress file.
+	if errRemoveProgress := os.Remove(t.progressFile); errRemoveProgress != nil && !os.IsNotExist(errRemoveProgress) {
+		logger.Warning(fmt.Sprintf("Failed to remove progress file: %v", errRemoveProgress))
+	}
+	// For MKV files, also remove the extracted SRT file when restarting.
+	if strings.HasSuffix(strings.ToLower(t.config.InputFile), ".mkv") {
+		extractedPath := t.getExtractedSRTPath()
+		if errRemoveExtracted := os.Remove(extractedPath); errRemoveExtracted != nil && !os.IsNotExist(errRemoveExtracted) {
+			logger.Warning(fmt.Sprintf("Failed to remove extracted SRT file: %v", errRemoveExtracted))
 		}
 	}
 }
 
-// saveProgress saves current progress to file
-func (t *Translator) saveProgress(line int, translatedSubtitles []srt.Subtitle) {
+func (t *Translator) initializeTranslationTask() error {
+	initializer, supportsInitialization := t.provider.(providers.TranslationTaskInitializer)
+	if !supportsInitialization {
+		return nil
+	}
+	return initializer.InitializeTranslationTask()
+}
+
+// saveProgress writes translated output before recording the matching progress and context.
+func (t *Translator) saveProgress(line int, translatedSubtitles []srt.Subtitle, contextMessages []providers.ContextMessage) error {
+	translatedContent := srt.ComposeSRT(translatedSubtitles)
+	if errWriteOutput := writeFileAtomically(t.outputFile, []byte(translatedContent), 0644); errWriteOutput != nil {
+		return fmt.Errorf("failed to write output file %s: %w", t.outputFile, errWriteOutput)
+	}
 	if t.progressFile == "" {
-		return
+		return nil
 	}
 
 	progress := ProgressInfo{
 		Line:      line,
 		InputFile: t.config.InputFile,
 	}
-
-	data, err := json.Marshal(progress)
-	if err != nil {
-		logger.Warning(fmt.Sprintf("Failed to marshal progress: %v", err))
-		return
+	if t.usesOpenAIResponses() {
+		fingerprint, errFingerprint := t.translationConfigFingerprint()
+		if errFingerprint != nil {
+			return fmt.Errorf("failed to fingerprint translation configuration: %w", errFingerprint)
+		}
+		progress.Provider = strings.ToLower(strings.TrimSpace(t.config.Provider))
+		progress.Protocol = strings.ToLower(strings.TrimSpace(t.config.OpenAIProtocol))
+		progress.Model = t.config.ModelName
+		progress.TranslationFingerprint = fingerprint
+		progress.PromptCacheKey = t.config.OpenAIPromptCacheKey
+		progress.Context = append([]providers.ContextMessage(nil), contextMessages...)
 	}
 
-	// Write translated subtitles to the file
-	translatedContent := srt.ComposeSRT(translatedSubtitles)
-	if err = os.WriteFile(t.outputFile, []byte(translatedContent), 0644); err != nil {
-		logger.Warning(fmt.Sprintf("failed to write output file: %v", err))
+	data, errMarshal := json.Marshal(progress)
+	if errMarshal != nil {
+		return fmt.Errorf("failed to marshal progress: %w", errMarshal)
 	}
+	if errWriteProgress := writeFileAtomically(t.progressFile, data, 0644); errWriteProgress != nil {
+		return fmt.Errorf("failed to write progress file %s: %w", t.progressFile, errWriteProgress)
+	}
+	return nil
+}
 
-	if err = os.WriteFile(t.progressFile, data, 0644); err != nil {
-		logger.Warning(fmt.Sprintf("Failed to save progress: %v", err))
+func writeFileAtomically(path string, data []byte, permissions os.FileMode) (returnErr error) {
+	directory := filepath.Dir(path)
+	tempFile, errCreate := os.CreateTemp(directory, "."+filepath.Base(path)+".tmp-*")
+	if errCreate != nil {
+		return errCreate
 	}
+	tempPath := tempFile.Name()
+	removeTemp := true
+	defer func() {
+		if tempFile != nil {
+			if errClose := tempFile.Close(); errClose != nil {
+				returnErr = stdErrors.Join(returnErr, fmt.Errorf("failed to close temporary file %s: %w", tempPath, errClose))
+			}
+		}
+		if removeTemp {
+			if errRemove := os.Remove(tempPath); errRemove != nil && !os.IsNotExist(errRemove) {
+				returnErr = stdErrors.Join(returnErr, fmt.Errorf("failed to remove temporary file %s: %w", tempPath, errRemove))
+			}
+		}
+	}()
+
+	if errChmod := tempFile.Chmod(permissions); errChmod != nil {
+		return fmt.Errorf("failed to set temporary file permissions: %w", errChmod)
+	}
+	bytesWritten, errWrite := tempFile.Write(data)
+	if errWrite != nil {
+		return fmt.Errorf("failed to write temporary file: %w", errWrite)
+	}
+	if bytesWritten != len(data) {
+		return fmt.Errorf("failed to write complete temporary file: wrote %d of %d bytes", bytesWritten, len(data))
+	}
+	if errClose := tempFile.Close(); errClose != nil {
+		tempFile = nil
+		return fmt.Errorf("failed to close temporary file %s: %w", tempPath, errClose)
+	}
+	tempFile = nil
+
+	if errRename := os.Rename(tempPath, path); errRename != nil {
+		return fmt.Errorf("failed to atomically replace %s: %w", path, errRename)
+	}
+	removeTemp = false
+	return nil
+}
+
+func (t *Translator) usesOpenAIResponses() bool {
+	return strings.EqualFold(strings.TrimSpace(t.config.Provider), "openai") &&
+		strings.EqualFold(strings.TrimSpace(t.config.OpenAIProtocol), "responses")
+}
+
+func (t *Translator) progressContextMatches(progress ProgressInfo) bool {
+	fingerprint, errFingerprint := t.translationConfigFingerprint()
+	if errFingerprint != nil {
+		return false
+	}
+	return progress.InputFile == t.config.InputFile &&
+		strings.EqualFold(strings.TrimSpace(progress.Provider), strings.TrimSpace(t.config.Provider)) &&
+		strings.EqualFold(strings.TrimSpace(progress.Protocol), strings.TrimSpace(t.config.OpenAIProtocol)) &&
+		progress.Model == t.config.ModelName &&
+		progress.TranslationFingerprint == fingerprint
+}
+
+func (t *Translator) translationConfigFingerprint() (string, error) {
+	fingerprintConfig := progressTranslationConfig{
+		BaseURL:        normalizeProgressBaseURL(t.config.BaseURL),
+		TargetLanguage: t.config.TargetLanguage,
+		Description:    t.config.Description,
+		Thinking:       t.config.Thinking,
+		ThinkingLevel:  t.config.ThinkingLevel,
+		Temperature:    t.config.Temperature,
+		TopP:           t.config.TopP,
+		TopK:           t.config.TopK,
+	}
+	data, errMarshal := json.Marshal(fingerprintConfig)
+	if errMarshal != nil {
+		return "", errMarshal
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func normalizeProgressBaseURL(baseURL string) string {
+	return strings.TrimRight(strings.TrimSpace(baseURL), "/")
 }
 
 // validateModel checks if the specified model is available
@@ -413,8 +572,8 @@ func (t *Translator) performTranslation(ctx context.Context) error {
 	total := len(originalSubtitles)
 	var batch []srt.SubtitleObject
 
-	// Build context from previous translations if resuming
-	if t.config.StartLine > 1 {
+	// Build compatibility context from previous translations when legacy progress has no saved context.
+	if t.config.StartLine > 1 && len(t.context) == 0 {
 		startIdx := max(0, t.config.StartLine-2-t.config.BatchSize)
 		var userBatch []srt.SubtitleObject
 		var modelBatch []srt.SubtitleObject
@@ -456,7 +615,9 @@ func (t *Translator) performTranslation(ctx context.Context) error {
 	i++
 
 	// Save initial progress
-	t.saveProgress(i, translatedSubtitles)
+	if errSaveProgress := t.saveProgress(i, translatedSubtitles, t.context); errSaveProgress != nil {
+		return errSaveProgress
+	}
 
 	// Main translation loop
 	for i < total || len(batch) > 0 {
@@ -488,11 +649,13 @@ func (t *Translator) performTranslation(ctx context.Context) error {
 		}
 		endTime := time.Now()
 
-		t.context = newContext
-
-		// Update progress
+		// Persist output and progress before advancing the in-memory context.
 		progressBar.Update(i)
-		t.saveProgress(i+1, translatedSubtitles)
+		nextProgressLine := min(i+1, total)
+		if errSaveProgress := t.saveProgress(nextProgressLine, translatedSubtitles, newContext); errSaveProgress != nil {
+			return errSaveProgress
+		}
+		t.context = newContext
 
 		// Apply delay if needed
 		if delay {

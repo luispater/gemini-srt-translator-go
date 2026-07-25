@@ -26,6 +26,9 @@ func TestNewConfig(t *testing.T) {
 	if cfg.ModelName != "gemini-3.5-flash" {
 		t.Errorf("Expected model name 'gemini-3.5-flash', got %v", cfg.ModelName)
 	}
+	if cfg.OpenAIProtocol != "chat-completions" {
+		t.Errorf("Expected OpenAI protocol 'chat-completions', got %v", cfg.OpenAIProtocol)
+	}
 	if cfg.BatchSize != 300 {
 		t.Errorf("Expected batch size 300, got %v", cfg.BatchSize)
 	}

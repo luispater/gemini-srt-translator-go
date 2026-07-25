@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
@@ -16,10 +17,12 @@ import (
 
 // OpenAIProvider implements TranslationProvider for OpenAI
 type OpenAIProvider struct {
-	config          *config.Config
-	client          *openai.Client
-	apiKeys         []string
-	currentAPIIndex int
+	config             *config.Config
+	client             *openai.Client
+	apiKeys            []string
+	currentAPIIndex    int
+	promptCacheKey     string
+	promptCacheKeyLock sync.Mutex
 }
 
 // NewOpenAIProvider creates a new OpenAI provider
@@ -34,6 +37,16 @@ func NewOpenAIProvider(cfg *config.Config) (*OpenAIProvider, error) {
 // GetName returns the provider name
 func (o *OpenAIProvider) GetName() string {
 	return "openai"
+}
+
+// InitializeTranslationTask initializes Responses state before any task requests are sent.
+func (o *OpenAIProvider) InitializeTranslationTask() error {
+	if !strings.EqualFold(strings.TrimSpace(o.config.OpenAIProtocol), "responses") {
+		return nil
+	}
+
+	_, errPromptCacheKey := o.getOrCreatePromptCacheKey()
+	return errPromptCacheKey
 }
 
 // getCurrentAPIKey returns the current API key if available
@@ -111,6 +124,10 @@ func (o *OpenAIProvider) CountTokens(ctx context.Context, modelName string, cont
 
 // TranslateBatch translates a batch of subtitle objects using OpenAI
 func (o *OpenAIProvider) TranslateBatch(ctx context.Context, batch []srt.SubtitleObject, previousContext []ContextMessage, config *TranslationConfig) (*TranslationResponse, error) {
+	if strings.EqualFold(strings.TrimSpace(o.config.OpenAIProtocol), "responses") {
+		return o.translateBatchWithResponses(ctx, batch, previousContext, config)
+	}
+
 	if o.client == nil {
 		if err := o.createClient(); err != nil {
 			return nil, err
@@ -259,6 +276,7 @@ func (o *OpenAIProvider) SwitchAPIKey() bool {
 		return false
 	}
 	o.currentAPIIndex = (o.currentAPIIndex + 1) % len(o.apiKeys)
+	o.client = nil
 	return true
 }
 

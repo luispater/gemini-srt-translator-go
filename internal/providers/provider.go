@@ -2,6 +2,7 @@ package providers
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/luispater/gemini-srt-translator-go/pkg/config"
 	"github.com/luispater/gemini-srt-translator-go/pkg/srt"
@@ -27,8 +28,9 @@ type TranslationProvider interface {
 
 // ContextMessage represents a conversation message for context
 type ContextMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string          `json:"role,omitempty"`
+	Content string          `json:"content,omitempty"`
+	RawItem json.RawMessage `json:"raw_item,omitempty"`
 }
 
 // TranslationConfig holds configuration for translation request
@@ -51,6 +53,11 @@ type TranslationResponse struct {
 	TranslatedBatch []srt.SubtitleObject
 	// Context contains only the conversation messages produced by the current batch.
 	Context []ContextMessage
+}
+
+// TranslationTaskInitializer initializes provider state that must exist before task requests begin.
+type TranslationTaskInitializer interface {
+	InitializeTranslationTask() error
 }
 
 // KeySwitcher interface for providers that support multiple API keys

@@ -72,7 +72,7 @@ func TestGetInstruction(t *testing.T) {
 			wantContains: []string{
 				"translates subtitles from any language to Simplified Chinese",
 				"Replace all of the \",\" \".\" \"!\" \"?\" to four spaces",
-				"Replace all of the \\n to four spaces",
+				"Replace all \\n, \\r, \\r\\n, and literal line breaks with four spaces",
 				"Remove all tags like <i></i>",
 			},
 		},
@@ -306,7 +306,7 @@ func TestCreateClient(t *testing.T) {
 			name:      "empty API key",
 			cfg:       &config.Config{},
 			apiKey:    "",
-			wantError: false, // The client creation might succeed but fail later in actual usage
+			wantError: true,
 		},
 	}
 
