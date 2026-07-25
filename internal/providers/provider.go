@@ -49,7 +49,8 @@ type TranslationConfig struct {
 // TranslationResponse holds the response from translation
 type TranslationResponse struct {
 	TranslatedBatch []srt.SubtitleObject
-	Context         []ContextMessage
+	// Context contains only the conversation messages produced by the current batch.
+	Context []ContextMessage
 }
 
 // KeySwitcher interface for providers that support multiple API keys

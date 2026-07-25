@@ -725,7 +725,12 @@ func (t *Translator) processBatchAttempt(ctx context.Context, batch []srt.Subtit
 
 	t.batchNumber++
 
-	return response.Context, nil
+	// Preserve every successful turn so subsequent batches receive the full conversation.
+	nextContext := make([]providers.ContextMessage, 0, len(t.context)+len(response.Context))
+	nextContext = append(nextContext, t.context...)
+	nextContext = append(nextContext, response.Context...)
+
+	return nextContext, nil
 }
 
 // processTranslatedLines processes the translated subtitle lines

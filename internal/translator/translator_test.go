@@ -207,6 +207,83 @@ func TestTranslator_validateTranslatedResponseRejectsMismatchedGuard(t *testing.
 	}
 }
 
+func TestTranslator_processBatchAttemptPreservesFullContext(t *testing.T) {
+	provider := &contextRecordingProvider{}
+	translator := &Translator{
+		config:   &config.Config{},
+		provider: provider,
+	}
+	translatedSubtitles := make([]srt.Subtitle, 3)
+
+	for i := range 3 {
+		batch := []srt.SubtitleObject{
+			{Index: i, Content: "source", Guard: translator.lineGuard(i)},
+		}
+		nextContext, errProcess := translator.processBatchAttempt(
+			context.Background(),
+			batch,
+			translatedSubtitles,
+			&ProgressBarWrapper{},
+			"",
+		)
+		if errProcess != nil {
+			t.Fatalf("processBatchAttempt() error = %v", errProcess)
+		}
+		translator.context = nextContext
+	}
+
+	wantPreviousContextLengths := []int{0, 2, 4}
+	if len(provider.previousContextLengths) != len(wantPreviousContextLengths) {
+		t.Fatalf("provider received %d requests, want %d", len(provider.previousContextLengths), len(wantPreviousContextLengths))
+	}
+	for i, wantLength := range wantPreviousContextLengths {
+		if provider.previousContextLengths[i] != wantLength {
+			t.Errorf("request %d previous context length = %d, want %d", i+1, provider.previousContextLengths[i], wantLength)
+		}
+	}
+	if len(translator.context) != 6 {
+		t.Fatalf("final context length = %d, want 6", len(translator.context))
+	}
+}
+
+func TestTranslator_processBatchAttemptExcludesFailedContext(t *testing.T) {
+	provider := &contextRecordingProvider{failCall: 2}
+	translator := &Translator{
+		config:   &config.Config{},
+		provider: provider,
+	}
+	translatedSubtitles := make([]srt.Subtitle, 2)
+	firstBatch := []srt.SubtitleObject{{Index: 0, Content: "first"}}
+	secondBatch := []srt.SubtitleObject{{Index: 1, Content: "second"}}
+
+	firstContext, errFirst := translator.processBatchAttempt(context.Background(), firstBatch, translatedSubtitles, &ProgressBarWrapper{}, "")
+	if errFirst != nil {
+		t.Fatalf("first processBatchAttempt() error = %v", errFirst)
+	}
+	translator.context = firstContext
+
+	failedContext, errFailed := translator.processBatchAttempt(context.Background(), secondBatch, translatedSubtitles, &ProgressBarWrapper{}, "")
+	if errFailed == nil || failedContext != nil {
+		t.Fatalf("failed attempt returned context %+v and error %v", failedContext, errFailed)
+	}
+
+	secondContext, errSecond := translator.processBatchAttempt(context.Background(), secondBatch, translatedSubtitles, &ProgressBarWrapper{}, "")
+	if errSecond != nil {
+		t.Fatalf("retry processBatchAttempt() error = %v", errSecond)
+	}
+	translator.context = secondContext
+
+	wantPreviousContextLengths := []int{0, 2, 2}
+	for i, wantLength := range wantPreviousContextLengths {
+		if provider.previousContextLengths[i] != wantLength {
+			t.Errorf("attempt %d previous context length = %d, want %d", i+1, provider.previousContextLengths[i], wantLength)
+		}
+	}
+	if len(translator.context) != 4 {
+		t.Fatalf("final context length = %d, want 4", len(translator.context))
+	}
+}
+
 func TestTranslator_isDominantRTL(t *testing.T) {
 	translator := &Translator{}
 
@@ -283,6 +360,28 @@ func TestProgressInfo_JSON(t *testing.T) {
 	}
 }
 
+type contextRecordingProvider struct {
+	mockProvider
+	previousContextLengths []int
+	failCall               int
+}
+
+func (p *contextRecordingProvider) TranslateBatch(ctx context.Context, batch []srt.SubtitleObject, previousContext []providers.ContextMessage, config *providers.TranslationConfig) (*providers.TranslationResponse, error) {
+	p.previousContextLengths = append(p.previousContextLengths, len(previousContext))
+	translatedBatch := batch
+	if p.failCall == len(p.previousContextLengths) {
+		translatedBatch = append([]srt.SubtitleObject(nil), batch...)
+		translatedBatch[0].Index++
+	}
+	return &providers.TranslationResponse{
+		TranslatedBatch: translatedBatch,
+		Context: []providers.ContextMessage{
+			{Role: "user", Content: "request"},
+			{Role: "model", Content: "response"},
+		},
+	}, nil
+}
+
 // mockProvider is a simple mock implementation for testing
 type mockProvider struct{}
 
@@ -301,7 +400,10 @@ func (m *mockProvider) CountTokens(ctx context.Context, modelName string, conten
 func (m *mockProvider) TranslateBatch(ctx context.Context, batch []srt.SubtitleObject, previousContext []providers.ContextMessage, config *providers.TranslationConfig) (*providers.TranslationResponse, error) {
 	return &providers.TranslationResponse{
 		TranslatedBatch: batch,
-		Context:         previousContext,
+		Context: []providers.ContextMessage{
+			{Role: "user", Content: "request"},
+			{Role: "model", Content: "response"},
+		},
 	}, nil
 }
 
