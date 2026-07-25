@@ -5,6 +5,19 @@ import (
 	"strings"
 )
 
+const (
+	// EnvProvider configures the AI provider.
+	EnvProvider = "SRT_TRANSLATOR_PROVIDER"
+	// EnvOpenAIProtocol configures the OpenAI API protocol.
+	EnvOpenAIProtocol = "SRT_TRANSLATOR_OPENAI_PROTOCOL"
+	// EnvBaseURL configures the API base URL.
+	EnvBaseURL = "SRT_TRANSLATOR_BASE_URL"
+	// EnvAPIKey configures one or more comma-separated API keys.
+	EnvAPIKey = "SRT_TRANSLATOR_API_KEY"
+	// EnvModel configures the model name.
+	EnvModel = "SRT_TRANSLATOR_MODEL"
+)
+
 // Config holds all configuration for the translator
 type Config struct {
 	// Provider selection
@@ -62,14 +75,63 @@ func parseAPIKeys(envKey string) []string {
 	return result
 }
 
-// NewConfig creates a new configuration with default values
+func environmentOrDefault(envKey string, defaultValue string) string {
+	if valueGetenv := os.Getenv(envKey); valueGetenv != "" {
+		return valueGetenv
+	}
+	return defaultValue
+}
+
+// NormalizeProvider returns the canonical provider name.
+func NormalizeProvider(provider string) string {
+	return strings.ToLower(strings.TrimSpace(provider))
+}
+
+func legacyAPIKeyEnvironment(provider string) string {
+	if NormalizeProvider(provider) == "openai" {
+		return "OPENAI_API_KEY"
+	}
+	return "GEMINI_API_KEY"
+}
+
+func legacyBaseURLEnvironment(provider string) string {
+	if NormalizeProvider(provider) == "openai" {
+		return "OPENAI_BASE_URL"
+	}
+	return "GOOGLE_GEMINI_BASE_URL"
+}
+
+func apiKeysFromEnvironment(provider string) []string {
+	if os.Getenv(EnvAPIKey) != "" {
+		return parseAPIKeys(EnvAPIKey)
+	}
+	return parseAPIKeys(legacyAPIKeyEnvironment(provider))
+}
+
+func baseURLFromEnvironment(provider string) string {
+	return environmentOrDefault(EnvBaseURL, os.Getenv(legacyBaseURLEnvironment(provider)))
+}
+
+func defaultModelForProvider(provider string, openAIProtocol string) string {
+	if NormalizeProvider(provider) == "openai" {
+		if strings.EqualFold(strings.TrimSpace(openAIProtocol), "responses") {
+			return "gpt-5"
+		}
+		return "gpt-4o"
+	}
+	return "gemini-3.5-flash"
+}
+
+// NewConfig creates a new configuration with default values.
 func NewConfig() *Config {
+	provider := NormalizeProvider(environmentOrDefault(EnvProvider, "gemini"))
+	openAIProtocol := environmentOrDefault(EnvOpenAIProtocol, "chat-completions")
 	return &Config{
-		Provider:       "gemini",                            // Default to Gemini for backward compatibility
-		OpenAIProtocol: "chat-completions",                  // Preserve the existing OpenAI behavior by default
-		APIKeys:        parseAPIKeys("GEMINI_API_KEY"),      // Default to Gemini env var
-		BaseURL:        os.Getenv("GOOGLE_GEMINI_BASE_URL"), // Default to Gemini base URL
-		ModelName:      "gemini-3.5-flash",
+		Provider:       provider,
+		OpenAIProtocol: openAIProtocol,
+		APIKeys:        apiKeysFromEnvironment(provider),
+		BaseURL:        baseURLFromEnvironment(provider),
+		ModelName:      environmentOrDefault(EnvModel, defaultModelForProvider(provider, openAIProtocol)),
 		BatchSize:      300,
 		RetryCount:     3,
 		Streaming:      true,
@@ -82,26 +144,22 @@ func NewConfig() *Config {
 	}
 }
 
-// LoadEnvironmentForProvider loads environment variables based on the provider
+// LoadEnvironmentForProvider loads legacy environment variables for the selected provider.
 func (c *Config) LoadEnvironmentForProvider() {
-	switch c.Provider {
-	case "openai":
-		// Load OpenAI environment variables
-		if len(c.APIKeys) == 0 {
-			c.APIKeys = parseAPIKeys("OPENAI_API_KEY")
-		}
-		if c.BaseURL == "" {
-			c.BaseURL = os.Getenv("OPENAI_BASE_URL")
-		}
-	case "gemini":
-		fallthrough
-	default:
-		// Load Gemini environment variables
-		if len(c.APIKeys) == 0 {
-			c.APIKeys = parseAPIKeys("GEMINI_API_KEY")
-		}
-		if c.BaseURL == "" {
-			c.BaseURL = os.Getenv("GOOGLE_GEMINI_BASE_URL")
-		}
+	c.LoadAPIKeysForProvider()
+	c.LoadBaseURLForProvider()
+}
+
+// LoadAPIKeysForProvider loads legacy API keys for the selected provider when none are configured.
+func (c *Config) LoadAPIKeysForProvider() {
+	if len(c.APIKeys) == 0 && os.Getenv(EnvAPIKey) == "" {
+		c.APIKeys = parseAPIKeys(legacyAPIKeyEnvironment(c.Provider))
+	}
+}
+
+// LoadBaseURLForProvider loads the legacy base URL for the selected provider when none is configured.
+func (c *Config) LoadBaseURLForProvider() {
+	if c.BaseURL == "" {
+		c.BaseURL = os.Getenv(legacyBaseURLEnvironment(c.Provider))
 	}
 }

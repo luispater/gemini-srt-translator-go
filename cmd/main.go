@@ -19,53 +19,55 @@ import (
 	"github.com/luispater/gemini-srt-translator-go/pkg/errors"
 )
 
-var cfg *config.Config
-
 // rootCmd represents the base command when called without any subcommands
-var rootCmd = &cobra.Command{
-	Use:   "gst [flags] <SRT_FILE|MKV_FILE>",
-	Short: "Translate SRT subtitle files or extract and translate subtitles from MKV files using AI",
-	Long: `Gemini SRT Translator is a powerful tool to translate subtitle files using AI providers (Gemini, OpenAI).
-Supports both SRT files and MKV files with embedded subtitles.
-Perfect for anyone needing fast, accurate, and customizable translations for videos, movies, and series.`,
-	SilenceUsage:  true, // Don't show usage on errors
-	SilenceErrors: true, // Don't show errors automatically (we handle them in main)
-	RunE: func(cmd *cobra.Command, args []string) error {
-		// Check if no arguments provided, show help
-		if len(args) == 0 {
-			return cmd.Help()
-		}
-		// Set input file from positional argument
-		cfg.InputFile = args[0]
-		return runTranslate(cmd, args)
-	},
+var rootCmd = newRootCommand()
+
+func newRootCommand() *cobra.Command {
+	return newRootCommandWithConfig(config.NewConfig())
 }
 
-func init() {
-	cfg = config.NewConfig()
+func newRootCommandWithConfig(commandConfig *config.Config) *cobra.Command {
+	rootCmd := &cobra.Command{
+		Use:   "gst [flags] <SRT_FILE|MKV_FILE>",
+		Short: "Translate SRT subtitle files or extract and translate subtitles from MKV files using AI",
+		Long: `Gemini SRT Translator is a powerful tool to translate subtitle files using AI providers (Gemini, OpenAI).
+Supports both SRT files and MKV files with embedded subtitles.
+Perfect for anyone needing fast, accurate, and customizable translations for videos, movies, and series.`,
+		SilenceUsage:  true, // Don't show usage on errors
+		SilenceErrors: true, // Don't show errors automatically (we handle them in main)
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Check if no arguments provided, show help
+			if len(args) == 0 {
+				return cmd.Help()
+			}
+			// Set input file from positional argument
+			commandConfig.InputFile = args[0]
+			return runTranslate(commandConfig)
+		},
+	}
 
 	// Root command flags (removed input-file flag)
-	rootCmd.Flags().StringVarP(&cfg.TargetLanguage, "target-language", "l", "Simplified Chinese", "Target language for translation")
-	rootCmd.Flags().StringVarP(&cfg.Provider, "provider", "p", "gemini", "AI provider (gemini, openai)")
-	rootCmd.Flags().StringVar(&cfg.OpenAIProtocol, "openai-protocol", cfg.OpenAIProtocol, "OpenAI API protocol (chat-completions, responses)")
-	rootCmd.Flags().StringVarP(&cfg.BaseURL, "base-url", "", "", "API Base URL (auto-detected based on provider)")
+	rootCmd.Flags().StringVarP(&commandConfig.TargetLanguage, "target-language", "l", "Simplified Chinese", "Target language for translation")
+	rootCmd.Flags().StringVarP(&commandConfig.Provider, "provider", "p", commandConfig.Provider, "AI provider (gemini, openai)")
+	rootCmd.Flags().StringVar(&commandConfig.OpenAIProtocol, "openai-protocol", commandConfig.OpenAIProtocol, "OpenAI API protocol (chat-completions, responses)")
+	rootCmd.Flags().StringVarP(&commandConfig.BaseURL, "base-url", "", commandConfig.BaseURL, "API Base URL (auto-detected based on provider)")
 
 	// Custom handling for comma-separated API keys
 	var apiKeysStr string
 	rootCmd.Flags().StringVarP(&apiKeysStr, "api-key", "k", "", "API key(s) - comma-separated for multiple keys (auto-detected based on provider)")
-	rootCmd.Flags().StringVarP(&cfg.OutputFile, "output-file", "o", "", "Output file path")
-	rootCmd.Flags().IntVarP(&cfg.StartLine, "start-line", "s", 0, "Starting line number")
-	rootCmd.Flags().StringVarP(&cfg.Description, "description", "d", "", "Description for translation context")
-	rootCmd.Flags().StringVarP(&cfg.ModelName, "model", "m", cfg.ModelName, "Model to use (gemini-2.5-pro, gpt-4o, etc.)")
-	rootCmd.Flags().IntVarP(&cfg.BatchSize, "batch-size", "b", cfg.BatchSize, "Batch size for translation")
-	rootCmd.Flags().IntVarP(&cfg.RetryCount, "retry-count", "r", cfg.RetryCount, "Number of retries for failed requests (default: 3)")
+	rootCmd.Flags().StringVarP(&commandConfig.OutputFile, "output-file", "o", "", "Output file path")
+	rootCmd.Flags().IntVarP(&commandConfig.StartLine, "start-line", "s", 0, "Starting line number")
+	rootCmd.Flags().StringVarP(&commandConfig.Description, "description", "d", "", "Description for translation context")
+	rootCmd.Flags().StringVarP(&commandConfig.ModelName, "model", "m", commandConfig.ModelName, "Model to use (gemini-2.5-pro, gpt-4o, etc.)")
+	rootCmd.Flags().IntVarP(&commandConfig.BatchSize, "batch-size", "b", commandConfig.BatchSize, "Batch size for translation")
+	rootCmd.Flags().IntVarP(&commandConfig.RetryCount, "retry-count", "r", commandConfig.RetryCount, "Number of retries for failed requests (default: 3)")
 
 	// Model tuning parameters
 	var temperature, topP, topK float32
 	rootCmd.Flags().Float32Var(&temperature, "temperature", 1.0, "Temperature (0.0-2.0)")
 	rootCmd.Flags().Float32Var(&topP, "top-p", 0.95, "Top P (0.0-1.0)")
 	rootCmd.Flags().Float32Var(&topK, "top-k", 0, "Top K (>=0)")
-	rootCmd.Flags().StringVar(&cfg.ThinkingLevel, "thinking-level", cfg.ThinkingLevel, "Thinking level (minimal, low, medium, high)")
+	rootCmd.Flags().StringVar(&commandConfig.ThinkingLevel, "thinking-level", commandConfig.ThinkingLevel, "Thinking level (minimal, low, medium, high)")
 
 	// Boolean flags
 	var noStreaming, noThinking, noColors, progressLog, quiet bool
@@ -83,88 +85,98 @@ func init() {
 
 	// Set flag processing
 	rootCmd.PreRunE = func(cmd *cobra.Command, args []string) error {
-		// Auto-detect provider based on model name if not explicitly set
-		if !cmd.Flags().Changed("provider") {
-			if strings.Contains(cfg.ModelName, "gpt") {
-				cfg.Provider = "openai"
-			} else if strings.Contains(cfg.ModelName, "gemini") {
-				cfg.Provider = "gemini"
+		// Auto-detect provider based on model name if not explicitly set.
+		if !cmd.Flags().Changed("provider") && os.Getenv(config.EnvProvider) == "" {
+			modelName := strings.ToLower(commandConfig.ModelName)
+			if strings.Contains(modelName, "gpt") {
+				commandConfig.Provider = "openai"
+			} else if strings.Contains(modelName, "gemini") {
+				commandConfig.Provider = "gemini"
 			}
 		}
+		commandConfig.Provider = config.NormalizeProvider(commandConfig.Provider)
 
-		// Load environment variables based on final provider
-		cfg.LoadEnvironmentForProvider()
+		// Reload legacy values for the selected provider unless a higher-priority source was provided.
+		loadLegacyAPIKeys := !cmd.Flags().Changed("api-key") && os.Getenv(config.EnvAPIKey) == ""
+		loadLegacyBaseURL := !cmd.Flags().Changed("base-url") && os.Getenv(config.EnvBaseURL) == ""
+		if loadLegacyAPIKeys {
+			commandConfig.APIKeys = nil
+			commandConfig.LoadAPIKeysForProvider()
+		}
+		if loadLegacyBaseURL {
+			commandConfig.BaseURL = ""
+			commandConfig.LoadBaseURLForProvider()
+		}
 
-		// Set default model based on provider
-		if !cmd.Flags().Changed("model") {
-			cfg.ModelName = defaultModelForProvider(cfg.Provider, cfg.OpenAIProtocol)
+		// Set default model based on provider.
+		if !cmd.Flags().Changed("model") && os.Getenv(config.EnvModel) == "" {
+			commandConfig.ModelName = defaultModelForProvider(commandConfig.Provider, commandConfig.OpenAIProtocol)
 		}
 
 		if cmd.Flags().Changed("api-key") {
-			// Override with command line values if provided
-			if apiKeysStr != "" {
-				keys := strings.Split(apiKeysStr, ",")
-				cfg.APIKeys = []string{}
-				for _, key := range keys {
-					trimmed := strings.TrimSpace(key)
-					if trimmed != "" {
-						cfg.APIKeys = append(cfg.APIKeys, trimmed)
-					}
+			// Override with command-line values, including an explicit empty value.
+			keys := strings.Split(apiKeysStr, ",")
+			commandConfig.APIKeys = []string{}
+			for _, key := range keys {
+				trimmed := strings.TrimSpace(key)
+				if trimmed != "" {
+					commandConfig.APIKeys = append(commandConfig.APIKeys, trimmed)
 				}
 			}
 		}
 
 		// Handle temperature
 		if cmd.Flags().Changed("temperature") {
-			cfg.Temperature = &temperature
+			commandConfig.Temperature = &temperature
 		}
 		if cmd.Flags().Changed("top-p") {
-			cfg.TopP = &topP
+			commandConfig.TopP = &topP
 		}
 		if cmd.Flags().Changed("top-k") {
-			cfg.TopK = &topK
+			commandConfig.TopK = &topK
 		}
 
-		// Handle boolean flags
+		// Handle boolean flags.
 		if noStreaming {
-			cfg.Streaming = false
+			commandConfig.Streaming = false
 		}
 		if noThinking {
-			cfg.Thinking = false
+			commandConfig.Thinking = false
 		}
 		if noColors {
-			cfg.UseColors = false
+			commandConfig.UseColors = false
 		}
 		if progressLog {
-			cfg.ProgressLog = true
+			commandConfig.ProgressLog = true
 		}
 		if quiet {
-			cfg.QuietMode = true
+			commandConfig.QuietMode = true
 		}
 		if paidQuota {
-			cfg.FreeQuota = false
+			commandConfig.FreeQuota = false
 		}
 		if resume {
 			resumeValue := true
-			cfg.Resume = &resumeValue
+			commandConfig.Resume = &resumeValue
 		}
 		if noResume {
 			resumeValue := false
-			cfg.Resume = &resumeValue
+			commandConfig.Resume = &resumeValue
 		}
 
-		// Handle interactive model selection
+		// Handle interactive model selection.
 		if interactive {
-			return selectModelInteractive()
+			return selectModelInteractive(commandConfig)
 		}
 
 		return nil
 	}
 
+	return rootCmd
 }
 
 func defaultModelForProvider(provider string, openAIProtocol string) string {
-	if strings.EqualFold(strings.TrimSpace(provider), "openai") {
+	if config.NormalizeProvider(provider) == "openai" {
 		if strings.EqualFold(strings.TrimSpace(openAIProtocol), "responses") {
 			return "gpt-5"
 		}
@@ -173,15 +185,17 @@ func defaultModelForProvider(provider string, openAIProtocol string) string {
 	return "gemini-3.5-flash"
 }
 
-func runTranslate(_ *cobra.Command, _ []string) error {
-	// Set logger modes
-	logger.SetColorMode(cfg.UseColors)
-	logger.SetQuietMode(cfg.QuietMode)
+func runTranslate(commandConfig *config.Config) error {
+	commandConfig.Provider = config.NormalizeProvider(commandConfig.Provider)
 
-	// Validate required fields based on provider
-	if len(cfg.APIKeys) == 0 {
+	// Set logger modes.
+	logger.SetColorMode(commandConfig.UseColors)
+	logger.SetQuietMode(commandConfig.QuietMode)
+
+	// Validate required fields based on provider.
+	if len(commandConfig.APIKeys) == 0 {
 		var prompt string
-		switch cfg.Provider {
+		switch commandConfig.Provider {
 		case "openai":
 			prompt = "Enter your OpenAI API key: "
 		case "gemini":
@@ -190,29 +204,29 @@ func runTranslate(_ *cobra.Command, _ []string) error {
 			prompt = "Enter your Gemini API key: "
 		}
 		apiKey := getAPIKeyFromInput(prompt)
-		cfg.APIKeys = []string{apiKey}
+		commandConfig.APIKeys = []string{apiKey}
 	}
 
-	if cfg.TargetLanguage == "" {
-		cfg.TargetLanguage = strings.TrimSpace(logger.InputPrompt("Enter target language: "))
+	if commandConfig.TargetLanguage == "" {
+		commandConfig.TargetLanguage = strings.TrimSpace(logger.InputPrompt("Enter target language: "))
 	}
 
-	// Validate file paths
-	if cfg.InputFile != "" {
-		if !validateVideoFilePath(cfg.InputFile) {
-			return errors.NewFileError("invalid input file", nil).WithContext("file_path", cfg.InputFile)
+	// Validate file paths.
+	if commandConfig.InputFile != "" {
+		if !validateVideoFilePath(commandConfig.InputFile) {
+			return errors.NewFileError("invalid input file", nil).WithContext("file_path", commandConfig.InputFile)
 		}
 	}
 
-	// Create translator and perform translation
-	t := translator.NewTranslator(cfg)
+	// Create translator and perform translation.
+	t := translator.NewTranslator(commandConfig)
 
 	ctx := context.Background()
 	return t.Translate(ctx)
 }
 
-func selectModelInteractive() error {
-	t := translator.NewTranslator(cfg)
+func selectModelInteractive(commandConfig *config.Config) error {
+	t := translator.NewTranslator(commandConfig)
 	ctx := context.Background()
 
 	models, err := t.GetModels(ctx)
@@ -238,8 +252,8 @@ func selectModelInteractive() error {
 			continue
 		}
 
-		cfg.ModelName = models[choice-1]
-		logger.Success(fmt.Sprintf("Selected model: %s", cfg.ModelName))
+		commandConfig.ModelName = models[choice-1]
+		logger.Success(fmt.Sprintf("Selected model: %s", commandConfig.ModelName))
 		break
 	}
 
@@ -259,7 +273,7 @@ func getAPIKeyFromInput(prompt string) string {
 }
 
 func validateVideoFilePath(filePath string) bool {
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+	if _, errStat := os.Stat(filePath); os.IsNotExist(errStat) {
 		logger.Error(fmt.Sprintf("File does not exist: %s", filePath))
 		return false
 	}
@@ -278,10 +292,10 @@ func validateVideoFilePath(filePath string) bool {
 }
 
 func main() {
-	if err := rootCmd.Execute(); err != nil {
+	if errExecute := rootCmd.Execute(); errExecute != nil {
 		// Handle structured errors with additional context
 		var translatorErr *errors.TranslatorError
-		if stdErrors.As(err, &translatorErr) {
+		if stdErrors.As(errExecute, &translatorErr) {
 			logger.Error(fmt.Sprintf("[%s] %s", strings.ToUpper(string(translatorErr.Type)), translatorErr.Message))
 			if translatorErr.Cause != nil {
 				logger.Error(fmt.Sprintf("Cause: %v", translatorErr.Cause))
@@ -294,7 +308,7 @@ func main() {
 			}
 		} else {
 			// Handle non-structured errors
-			logger.Error(fmt.Sprintf("Error: %v", err))
+			logger.Error(fmt.Sprintf("Error: %v", errExecute))
 		}
 		os.Exit(1)
 	}

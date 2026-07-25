@@ -6,22 +6,24 @@ import (
 )
 
 func TestNewConfig(t *testing.T) {
-	// Save original environment
-	originalAPIKey := os.Getenv("GEMINI_API_KEY")
-	defer func() {
-		if originalAPIKey != "" {
-			_ = os.Setenv("GEMINI_API_KEY", originalAPIKey)
-		} else {
-			_ = os.Unsetenv("GEMINI_API_KEY")
-		}
-	}()
+	t.Setenv(EnvProvider, "")
+	t.Setenv(EnvOpenAIProtocol, "")
+	t.Setenv(EnvBaseURL, "")
+	t.Setenv(EnvAPIKey, "")
+	t.Setenv(EnvModel, "")
+	t.Setenv("GEMINI_API_KEY", "")
+	t.Setenv("GOOGLE_GEMINI_BASE_URL", "")
 
-	// Test with no API key
-	_ = os.Unsetenv("GEMINI_API_KEY")
 	cfg := NewConfig()
 
+	if cfg.Provider != "gemini" {
+		t.Errorf("Expected provider 'gemini', got %q", cfg.Provider)
+	}
 	if len(cfg.APIKeys) != 0 {
 		t.Errorf("Expected empty API keys, got %v", cfg.APIKeys)
+	}
+	if cfg.BaseURL != "" {
+		t.Errorf("Expected empty base URL, got %q", cfg.BaseURL)
 	}
 	if cfg.ModelName != "gemini-3.5-flash" {
 		t.Errorf("Expected model name 'gemini-3.5-flash', got %v", cfg.ModelName)
@@ -46,6 +48,141 @@ func TestNewConfig(t *testing.T) {
 	}
 	if !cfg.UseColors {
 		t.Error("Expected use colors to be true")
+	}
+}
+
+func TestNewConfigFromSRTEnvironment(t *testing.T) {
+	t.Setenv(EnvProvider, "openai")
+	t.Setenv(EnvOpenAIProtocol, "responses")
+	t.Setenv(EnvBaseURL, "https://example.com/v1")
+	t.Setenv(EnvAPIKey, "key1, key2")
+	t.Setenv(EnvModel, "gpt-test")
+	t.Setenv("GEMINI_API_KEY", "legacy-key")
+	t.Setenv("GOOGLE_GEMINI_BASE_URL", "https://legacy.example.com")
+
+	cfg := NewConfig()
+
+	if cfg.Provider != "openai" {
+		t.Errorf("Expected provider 'openai', got %q", cfg.Provider)
+	}
+	if cfg.OpenAIProtocol != "responses" {
+		t.Errorf("Expected OpenAI protocol 'responses', got %q", cfg.OpenAIProtocol)
+	}
+	if cfg.BaseURL != "https://example.com/v1" {
+		t.Errorf("Expected SRT translator base URL, got %q", cfg.BaseURL)
+	}
+	if cfg.ModelName != "gpt-test" {
+		t.Errorf("Expected model name 'gpt-test', got %q", cfg.ModelName)
+	}
+	if len(cfg.APIKeys) != 2 || cfg.APIKeys[0] != "key1" || cfg.APIKeys[1] != "key2" {
+		t.Errorf("Expected SRT translator API keys, got %v", cfg.APIKeys)
+	}
+}
+
+func TestNewConfigDoesNotUseLegacyAPIKeysWhenUnifiedValueHasNoKeys(t *testing.T) {
+	t.Setenv(EnvProvider, "openai")
+	t.Setenv(EnvAPIKey, " , ")
+	t.Setenv("GEMINI_API_KEY", "gemini-key")
+	t.Setenv("OPENAI_API_KEY", "openai-key")
+
+	cfg := NewConfig()
+
+	if len(cfg.APIKeys) != 0 {
+		t.Errorf("API keys = %v, want no legacy API keys", cfg.APIKeys)
+	}
+}
+
+func TestNewConfigUsesProviderDefaultModel(t *testing.T) {
+	t.Setenv(EnvModel, "")
+
+	tests := []struct {
+		name           string
+		provider       string
+		openAIProtocol string
+		wantModel      string
+	}{
+		{
+			name:           "OpenAI Responses",
+			provider:       "openai",
+			openAIProtocol: "responses",
+			wantModel:      "gpt-5",
+		},
+		{
+			name:           "OpenAI Chat Completions",
+			provider:       "openai",
+			openAIProtocol: "chat-completions",
+			wantModel:      "gpt-4o",
+		},
+		{
+			name:           "OpenAI other protocol",
+			provider:       "openai",
+			openAIProtocol: "other",
+			wantModel:      "gpt-4o",
+		},
+		{
+			name:           "Gemini",
+			provider:       "gemini",
+			openAIProtocol: "responses",
+			wantModel:      "gemini-3.5-flash",
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Setenv(EnvProvider, testCase.provider)
+			t.Setenv(EnvOpenAIProtocol, testCase.openAIProtocol)
+
+			cfg := NewConfig()
+
+			if cfg.ModelName != testCase.wantModel {
+				t.Errorf("Model name = %q, want %q", cfg.ModelName, testCase.wantModel)
+			}
+		})
+	}
+}
+
+func TestNewConfigUsesProviderSpecificLegacyEnvironment(t *testing.T) {
+	t.Setenv(EnvOpenAIProtocol, "")
+	t.Setenv(EnvBaseURL, "")
+	t.Setenv(EnvAPIKey, "")
+	t.Setenv(EnvModel, "")
+	t.Setenv("GEMINI_API_KEY", "gemini-key")
+	t.Setenv("GOOGLE_GEMINI_BASE_URL", "https://gemini.example.com")
+	t.Setenv("OPENAI_API_KEY", "openai-key")
+	t.Setenv("OPENAI_BASE_URL", "https://openai.example.com")
+
+	tests := []struct {
+		name        string
+		provider    string
+		wantAPIKey  string
+		wantBaseURL string
+	}{
+		{
+			name:        "Gemini legacy environment",
+			provider:    "gemini",
+			wantAPIKey:  "gemini-key",
+			wantBaseURL: "https://gemini.example.com",
+		},
+		{
+			name:        "OpenAI legacy environment",
+			provider:    "openai",
+			wantAPIKey:  "openai-key",
+			wantBaseURL: "https://openai.example.com",
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Setenv(EnvProvider, testCase.provider)
+			cfg := NewConfig()
+
+			if len(cfg.APIKeys) != 1 || cfg.APIKeys[0] != testCase.wantAPIKey {
+				t.Errorf("API keys = %v, want [%q]", cfg.APIKeys, testCase.wantAPIKey)
+			}
+			if cfg.BaseURL != testCase.wantBaseURL {
+				t.Errorf("Base URL = %q, want %q", cfg.BaseURL, testCase.wantBaseURL)
+			}
+		})
 	}
 }
 

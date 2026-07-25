@@ -77,6 +77,7 @@ type ProviderFactory struct{}
 
 // NewProvider creates a new provider instance based on the configuration
 func (f *ProviderFactory) NewProvider(cfg *config.Config) (TranslationProvider, error) {
+	cfg.Provider = config.NormalizeProvider(cfg.Provider)
 	switch cfg.Provider {
 	case "openai":
 		return NewOpenAIProvider(cfg)
