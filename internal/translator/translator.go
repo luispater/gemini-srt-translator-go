@@ -922,13 +922,21 @@ func (t *Translator) performTranslation(ctx context.Context) error {
 	// Stop the progress bar rendering goroutine
 	progressBar.Stop()
 
+	t.removeCompletedTaskFiles()
+	return nil
+}
+
+func (t *Translator) removeCompletedTaskFiles() {
 	if t.progressFile != "" {
-		if err = os.Remove(t.progressFile); err != nil && !os.IsNotExist(err) {
-			t.reportProgressMessage(fmt.Sprintf("Failed to remove progress file: %v", err), logger.Yellow)
+		if errRemoveProgress := os.Remove(t.progressFile); errRemoveProgress != nil && !os.IsNotExist(errRemoveProgress) {
+			t.reportProgressMessage(fmt.Sprintf("Failed to remove progress file: %v", errRemoveProgress), logger.Yellow)
 		}
 	}
-
-	return nil
+	if strings.EqualFold(filepath.Ext(t.config.InputFile), ".mkv") && t.metadataFile != "" {
+		if errRemoveMetadata := os.Remove(t.metadataFile); errRemoveMetadata != nil && !os.IsNotExist(errRemoveMetadata) {
+			t.reportProgressMessage(fmt.Sprintf("Failed to remove translation metadata: %v", errRemoveMetadata), logger.Yellow)
+		}
+	}
 }
 
 // validateTokenSize validates that the batch doesn't exceed token limits

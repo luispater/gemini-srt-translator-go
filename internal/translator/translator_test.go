@@ -562,6 +562,34 @@ func TestTranslatorSaveProgressPersistsMKVSourceMetadata(t *testing.T) {
 	}
 }
 
+func TestTranslatorRemoveCompletedTaskFilesRemovesMKVMetadata(t *testing.T) {
+	tempDir := t.TempDir()
+	progressPath := filepath.Join(tempDir, "movie.progress")
+	metadataPath := filepath.Join(tempDir, "movie.srt.gst-meta.json")
+	outputPath := filepath.Join(tempDir, "movie.srt")
+	for _, filePath := range []string{progressPath, metadataPath, outputPath} {
+		if errWrite := os.WriteFile(filePath, []byte("test"), 0644); errWrite != nil {
+			t.Fatalf("Failed to create task file %s: %v", filePath, errWrite)
+		}
+	}
+	translator := &Translator{
+		config:       &config.Config{InputFile: filepath.Join(tempDir, "movie.mkv")},
+		outputFile:   outputPath,
+		progressFile: progressPath,
+		metadataFile: metadataPath,
+	}
+
+	translator.removeCompletedTaskFiles()
+	for _, removedPath := range []string{progressPath, metadataPath} {
+		if _, errStat := os.Stat(removedPath); !os.IsNotExist(errStat) {
+			t.Errorf("Completed task file still exists: %s", removedPath)
+		}
+	}
+	if _, errStatOutput := os.Stat(outputPath); errStatOutput != nil {
+		t.Errorf("Translated output was removed: %v", errStatOutput)
+	}
+}
+
 func TestTranslatorCheckSavedProgressRestoresOnlyMatchingResponsesContext(t *testing.T) {
 	tempDir := t.TempDir()
 	inputPath := filepath.Join(tempDir, "input.srt")
