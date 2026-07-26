@@ -1,9 +1,12 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/luispater/gemini-srt-translator-go/internal/providers"
+	"github.com/luispater/gemini-srt-translator-go/internal/translator"
 	"github.com/luispater/gemini-srt-translator-go/pkg/config"
 )
 
@@ -285,6 +288,125 @@ func clearConfigurationEnvironment(t *testing.T) {
 		"OPENAI_BASE_URL",
 	} {
 		t.Setenv(environmentName, "")
+	}
+}
+
+func TestExpandInputFilesSupportsGlobsAndExplicitFiles(t *testing.T) {
+	tempDir := t.TempDir()
+	firstFile := filepath.Join(tempDir, "episode-01.srt")
+	secondFile := filepath.Join(tempDir, "episode-02.srt")
+	mkvFile := filepath.Join(tempDir, "movie.mkv")
+	for _, filePath := range []string{firstFile, secondFile, mkvFile} {
+		if errWrite := os.WriteFile(filePath, []byte("test"), 0644); errWrite != nil {
+			t.Fatalf("Failed to create test input %s: %v", filePath, errWrite)
+		}
+	}
+
+	inputFiles, errExpand := expandInputFiles([]string{
+		filepath.Join(tempDir, "episode-*.srt"),
+		mkvFile,
+		firstFile,
+	})
+	if errExpand != nil {
+		t.Fatalf("expandInputFiles() error = %v", errExpand)
+	}
+
+	wantFiles := []string{firstFile, secondFile, mkvFile}
+	if len(inputFiles) != len(wantFiles) {
+		t.Fatalf("expandInputFiles() returned %d files, want %d: %v", len(inputFiles), len(wantFiles), inputFiles)
+	}
+	for fileIndex, wantFile := range wantFiles {
+		if inputFiles[fileIndex] != wantFile {
+			t.Errorf("input file %d = %q, want %q", fileIndex, inputFiles[fileIndex], wantFile)
+		}
+	}
+}
+
+func TestExpandInputFilesRejectsUnmatchedGlob(t *testing.T) {
+	_, errExpand := expandInputFiles([]string{filepath.Join(t.TempDir(), "*.mkv")})
+	if errExpand == nil {
+		t.Fatal("expandInputFiles() returned no error for an unmatched glob")
+	}
+}
+
+func TestExpandInputFilesPrefersExistingLiteralPathAndDeduplicatesSymlink(t *testing.T) {
+	tempDir := t.TempDir()
+	literalPath := filepath.Join(tempDir, "episode[1].srt")
+	if errWrite := os.WriteFile(literalPath, []byte("test"), 0644); errWrite != nil {
+		t.Fatalf("Failed to create literal input: %v", errWrite)
+	}
+	symlinkPath := filepath.Join(tempDir, "episode-link.srt")
+	if errSymlink := os.Symlink(literalPath, symlinkPath); errSymlink != nil {
+		t.Fatalf("Failed to create symlink: %v", errSymlink)
+	}
+
+	inputFiles, errExpand := expandInputFiles([]string{literalPath, symlinkPath})
+	if errExpand != nil {
+		t.Fatalf("expandInputFiles() error = %v", errExpand)
+	}
+	if len(inputFiles) != 1 || inputFiles[0] != literalPath {
+		t.Errorf("expandInputFiles() = %v, want [%s]", inputFiles, literalPath)
+	}
+}
+
+func TestCanonicalPathResolvesSymlinkedParentForMissingArtifact(t *testing.T) {
+	tempDir := t.TempDir()
+	realDir := filepath.Join(tempDir, "real")
+	if errMkdir := os.Mkdir(realDir, 0755); errMkdir != nil {
+		t.Fatalf("Failed to create real directory: %v", errMkdir)
+	}
+	aliasDir := filepath.Join(tempDir, "alias")
+	if errSymlink := os.Symlink(realDir, aliasDir); errSymlink != nil {
+		t.Fatalf("Failed to create directory symlink: %v", errSymlink)
+	}
+
+	realArtifact, errCanonicalReal := canonicalPath(filepath.Join(realDir, "future.srt"))
+	if errCanonicalReal != nil {
+		t.Fatalf("Failed to canonicalize real artifact: %v", errCanonicalReal)
+	}
+	aliasArtifact, errCanonicalAlias := canonicalPath(filepath.Join(aliasDir, "future.srt"))
+	if errCanonicalAlias != nil {
+		t.Fatalf("Failed to canonicalize alias artifact: %v", errCanonicalAlias)
+	}
+	if realArtifact != aliasArtifact {
+		t.Errorf("Canonical paths differ: real=%q alias=%q", realArtifact, aliasArtifact)
+	}
+}
+
+func TestValidateTranslationTaskPathsRejectsSharedArtifacts(t *testing.T) {
+	tempDir := t.TempDir()
+	srtPath := filepath.Join(tempDir, "movie.srt")
+	mkvPath := filepath.Join(tempDir, "movie.mkv")
+	for _, inputPath := range []string{srtPath, mkvPath} {
+		if errWrite := os.WriteFile(inputPath, []byte("test"), 0644); errWrite != nil {
+			t.Fatalf("Failed to create input: %v", errWrite)
+		}
+	}
+
+	tasks := []translationTask{
+		{filename: srtPath, translator: translator.NewTranslator(&config.Config{InputFile: srtPath, TargetLanguage: "Simplified Chinese"})},
+		{filename: mkvPath, translator: translator.NewTranslator(&config.Config{InputFile: mkvPath, TargetLanguage: "Simplified Chinese"})},
+	}
+	if errValidate := validateTranslationTaskPaths(tasks); errValidate == nil {
+		t.Fatal("validateTranslationTaskPaths() accepted tasks with shared artifacts")
+	}
+}
+
+func TestValidateTranslationTaskPathsRejectsInputOverwrite(t *testing.T) {
+	inputPath := filepath.Join(t.TempDir(), "episode.srt")
+	if errWrite := os.WriteFile(inputPath, []byte("test"), 0644); errWrite != nil {
+		t.Fatalf("Failed to create input: %v", errWrite)
+	}
+	tasks := []translationTask{{
+		filename: inputPath,
+		translator: translator.NewTranslator(&config.Config{
+			InputFile:      inputPath,
+			OutputFile:     inputPath,
+			TargetLanguage: "French",
+		}),
+	}}
+	if errValidate := validateTranslationTaskPaths(tasks); errValidate == nil {
+		t.Fatal("validateTranslationTaskPaths() accepted an output that overwrites its input")
 	}
 }
 

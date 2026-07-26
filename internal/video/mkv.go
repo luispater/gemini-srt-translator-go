@@ -2,19 +2,17 @@ package video
 
 import (
 	"bufio"
+	stdErrors "errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/luispater/matroska-go"
 
-	"github.com/luispater/gemini-srt-translator-go/internal/logger"
 	"github.com/luispater/gemini-srt-translator-go/pkg/errors"
-	"github.com/luispater/gemini-srt-translator-go/pkg/languages"
 	"github.com/luispater/gemini-srt-translator-go/pkg/srt"
 )
 
@@ -51,71 +49,73 @@ func NewMKVParser(filename string) *MKVParser {
 	}
 }
 
-// Parse parses the MKV file and extracts subtitle tracks
+// Parse parses the MKV file and extracts subtitle tracks and packets.
 func (p *MKVParser) Parse() error {
-	file, err := os.Open(p.filename)
-	if err != nil {
-		return errors.NewFileError(fmt.Sprintf("failed to open MKV file: %s", p.filename), err)
+	return p.parse(true)
+}
+
+// ParseTracks parses only MKV track metadata without reading subtitle packets.
+func (p *MKVParser) ParseTracks() error {
+	return p.parse(false)
+}
+
+func (p *MKVParser) parse(includePackets bool) (returnErr error) {
+	file, errOpen := os.Open(p.filename)
+	if errOpen != nil {
+		return errors.NewFileError(fmt.Sprintf("failed to open MKV file: %s", p.filename), errOpen)
 	}
 	defer func() {
 		if errClose := file.Close(); errClose != nil {
-			// Log error but don't fail the operation
+			returnErr = stdErrors.Join(returnErr, errors.NewFileError("failed to close MKV file", errClose))
 		}
 	}()
 
-	// Create demuxer
-	demuxer, err := matroska.NewDemuxer(file)
-	if err != nil {
-		return errors.NewFileError("failed to create Matroska demuxer", err)
+	demuxer, errDemuxer := matroska.NewDemuxer(file)
+	if errDemuxer != nil {
+		return errors.NewFileError("failed to create Matroska demuxer", errDemuxer)
 	}
 	defer demuxer.Close()
 
-	// Get file info for timecode scale
-	fileInfo, err := demuxer.GetFileInfo()
-	if err != nil {
-		return errors.NewFileError("failed to get file info", err)
+	fileInfo, errFileInfo := demuxer.GetFileInfo()
+	if errFileInfo != nil {
+		return errors.NewFileError("failed to get file info", errFileInfo)
 	}
 	p.timecodescale = fileInfo.TimecodeScale
 
-	// Get number of tracks
-	numTracks, err := demuxer.GetNumTracks()
-	if err != nil {
-		return errors.NewFileError("failed to get number of tracks", err)
+	numTracks, errNumTracks := demuxer.GetNumTracks()
+	if errNumTracks != nil {
+		return errors.NewFileError("failed to get number of tracks", errNumTracks)
 	}
 
-	// Extract subtitle tracks (with deduplication)
+	p.tracks = nil
 	seenTracks := make(map[uint8]bool)
 	for i := uint(0); i < numTracks; i++ {
 		trackInfo, errGetTrackInfo := demuxer.GetTrackInfo(i)
 		if errGetTrackInfo != nil {
-			continue // Skip tracks we can't read
+			continue
 		}
-
-		// Only process subtitle tracks
-		if trackInfo.Type == matroska.TypeSubtitle && strings.HasPrefix(trackInfo.CodecID, "S_TEXT") {
-			// Skip duplicate track numbers
-			if seenTracks[trackInfo.Number] {
-				continue
-			}
-			seenTracks[trackInfo.Number] = true
-
-			track := SubtitleTrack{
-				Number:   int(trackInfo.Number),
-				Language: trackInfo.Language,
-				Name:     trackInfo.Name,
-				Codec:    trackInfo.CodecID,
-				Entries:  []SubtitleEntry{},
-			}
-			p.tracks = append(p.tracks, track)
+		if trackInfo.Type != matroska.TypeSubtitle || !strings.HasPrefix(trackInfo.CodecID, "S_TEXT") {
+			continue
 		}
+		if seenTracks[trackInfo.Number] {
+			continue
+		}
+		seenTracks[trackInfo.Number] = true
+		p.tracks = append(p.tracks, SubtitleTrack{
+			Number:   int(trackInfo.Number),
+			Language: trackInfo.Language,
+			Name:     trackInfo.Name,
+			Codec:    trackInfo.CodecID,
+			Entries:  []SubtitleEntry{},
+		})
 	}
 
-	// Extract subtitle packets
-	err = p.extractSubtitlePackets(demuxer)
-	if err != nil {
-		return errors.NewFileError("failed to extract subtitle packets", err)
+	if !includePackets {
+		return nil
 	}
-
+	if errExtract := p.extractSubtitlePackets(demuxer); errExtract != nil {
+		return errors.NewFileError("failed to extract subtitle packets", errExtract)
+	}
 	return nil
 }
 
@@ -174,41 +174,42 @@ func (p *MKVParser) GetSubtitleTracks() []SubtitleTrack {
 	return p.tracks
 }
 
-// SelectBestEnglishTrack selects the best English subtitle track (non-SDH preferred)
-func (p *MKVParser) SelectBestEnglishTrack() (*SubtitleTrack, error) {
+// SelectBestSubtitleTrack selects an English non-SDH track when available.
+func SelectBestSubtitleTrack(tracks []SubtitleTrack) *SubtitleTrack {
 	var englishTracks []SubtitleTrack
-
-	// Filter for English tracks
-	for _, track := range p.tracks {
+	for _, track := range tracks {
 		if isEnglishTrack(track.Language) {
 			englishTracks = append(englishTracks, track)
 		}
 	}
-
 	if len(englishTracks) == 0 {
-		if len(p.tracks) > 0 {
-			return &p.tracks[0], nil
+		if len(tracks) == 0 {
+			return nil
 		}
+		selected := tracks[0]
+		return &selected
 	}
-
-	// If only one track, return it
-	if len(englishTracks) == 1 {
-		return &englishTracks[0], nil
-	}
-
-	// Prefer non-SDH tracks
 	for _, track := range englishTracks {
 		if !isSDHTrack(track.Name) {
-			return &track, nil
+			selected := track
+			return &selected
 		}
 	}
+	selected := englishTracks[0]
+	return &selected
+}
 
-	// If all are SDH or no preference, return the first one
-	return &englishTracks[0], nil
+// SelectBestEnglishTrack selects the best English subtitle track (non-SDH preferred).
+func (p *MKVParser) SelectBestEnglishTrack() (*SubtitleTrack, error) {
+	selected := SelectBestSubtitleTrack(p.tracks)
+	if selected == nil {
+		return nil, errors.NewValidationError("no subtitle tracks found in MKV", nil)
+	}
+	return selected, nil
 }
 
 // ExtractToSRT extracts a subtitle track to SRT format
-func (p *MKVParser) ExtractToSRT(track *SubtitleTrack, outputPath string) error {
+func (p *MKVParser) ExtractToSRT(track *SubtitleTrack, outputPath string) (returnErr error) {
 	if len(track.Entries) == 0 {
 		return errors.NewValidationError("subtitle track is empty", nil)
 	}
@@ -235,7 +236,7 @@ func (p *MKVParser) ExtractToSRT(track *SubtitleTrack, outputPath string) error 
 	}
 	defer func() {
 		if errClose := file.Close(); errClose != nil {
-			// Log error but don't fail the operation
+			returnErr = stdErrors.Join(returnErr, errors.NewFileError("failed to close SRT output file", errClose))
 		}
 	}()
 
@@ -251,21 +252,32 @@ func (p *MKVParser) ExtractToSRT(track *SubtitleTrack, outputPath string) error 
 	return nil
 }
 
-// ExtractSubtitlesFromMKV extracts subtitles from MKV file and returns the path to extracted SRT
-func ExtractSubtitlesFromMKV(mkvPath string) (string, error) {
-	// Validate input file
-	if !strings.HasSuffix(strings.ToLower(mkvPath), ".mkv") {
-		return "", errors.NewValidationError("file is not an MKV file", nil).WithContext("file_path", mkvPath)
+// InspectSubtitleTracks returns MKV subtitle track metadata for interactive selection.
+func InspectSubtitleTracks(mkvPath string) ([]SubtitleTrack, error) {
+	if errValidate := validateMKVPath(mkvPath); errValidate != nil {
+		return nil, errValidate
 	}
 
-	if _, err := os.Stat(mkvPath); os.IsNotExist(err) {
-		return "", errors.NewFileError(fmt.Sprintf("MKV file does not exist: %s", mkvPath), err)
-	}
-
-	// Create parser and parse the file
 	parser := NewMKVParser(mkvPath)
-	if err := parser.Parse(); err != nil {
-		return "", err
+	if errParse := parser.ParseTracks(); errParse != nil {
+		return nil, errParse
+	}
+	tracks := parser.GetSubtitleTracks()
+	if len(tracks) == 0 {
+		return nil, errors.NewValidationError("no subtitle tracks found in MKV", nil)
+	}
+	return tracks, nil
+}
+
+// ExtractSubtitlesFromMKV extracts the selected subtitle track and returns its SRT path.
+func ExtractSubtitlesFromMKV(mkvPath string, trackNumber int) (string, error) {
+	if errValidate := validateMKVPath(mkvPath); errValidate != nil {
+		return "", errValidate
+	}
+
+	parser := NewMKVParser(mkvPath)
+	if errParse := parser.Parse(); errParse != nil {
+		return "", errParse
 	}
 
 	tracks := parser.GetSubtitleTracks()
@@ -273,61 +285,49 @@ func ExtractSubtitlesFromMKV(mkvPath string) (string, error) {
 		return "", errors.NewValidationError("no subtitle tracks found in MKV", nil)
 	}
 
-	var selectedIdx int
-	if len(tracks) == 1 {
-		// Only one subtitle track is available; select it automatically
-		logger.Info("Only one subtitle track found; selecting it automatically.")
-		selectedIdx = 0
-	} else {
-		logger.Info("Available subtitle tracks:")
-		for i, tr := range tracks {
-			lines := len(tr.Entries)
-			name := strings.TrimSpace(tr.Name)
-			lang := tr.Language
-			bcp := languages.BCP47FromMKV(lang)
-			if bcp != "" {
-				if name != "" {
-					lang = fmt.Sprintf("%s (%s)", bcp, name)
-				} else {
-					lang = fmt.Sprintf("%s", bcp)
-				}
-			}
-			logger.Info(fmt.Sprintf("[%d] Language: %s, Lines:%d", i+1, lang, lines))
-		}
-
-		for {
-			input := logger.InputPrompt("Select track number to extract: ")
-			input = strings.TrimSpace(input)
-			if input == "" {
-				best, errSel := parser.SelectBestEnglishTrack()
-				if errSel == nil && best != nil {
-					for i := range tracks {
-						if tracks[i].Number == best.Number {
-							selectedIdx = i
-							break
-						}
-					}
-					break
-				}
-			}
-			if n, errAtoi := strconv.Atoi(input); errAtoi == nil && n >= 1 && n <= len(tracks) {
-				selectedIdx = n - 1
-				break
-			}
-			logger.Warning("Invalid selection. Enter a valid number.")
+	var selected *SubtitleTrack
+	for i := range tracks {
+		if tracks[i].Number == trackNumber {
+			selected = &tracks[i]
+			break
 		}
 	}
-
-	selected := tracks[selectedIdx]
+	if selected == nil && trackNumber == 0 {
+		bestTrack, errBestTrack := parser.SelectBestEnglishTrack()
+		if errBestTrack != nil {
+			return "", errBestTrack
+		}
+		selected = bestTrack
+	}
+	if selected == nil {
+		return "", errors.NewValidationError("selected subtitle track was not found", nil).WithContext("track_number", trackNumber)
+	}
 
 	baseName := strings.TrimSuffix(filepath.Base(mkvPath), filepath.Ext(mkvPath))
-	outputPath := filepath.Join(filepath.Dir(mkvPath), baseName+"_extracted.srt")
-
-	if err := parser.ExtractToSRT(&selected, outputPath); err != nil {
-		return "", err
+	tempFile, errCreateTemp := os.CreateTemp("", "gst-"+baseName+"-*.srt")
+	if errCreateTemp != nil {
+		return "", errors.NewFileError("failed to create temporary subtitle file", errCreateTemp)
 	}
+	tempPath := tempFile.Name()
+	if errCloseTemp := tempFile.Close(); errCloseTemp != nil {
+		_ = os.Remove(tempPath)
+		return "", errors.NewFileError("failed to close temporary subtitle file", errCloseTemp)
+	}
+	if errExtract := parser.ExtractToSRT(selected, tempPath); errExtract != nil {
+		_ = os.Remove(tempPath)
+		return "", errExtract
+	}
+	return tempPath, nil
+}
 
-	return outputPath, nil
+func validateMKVPath(mkvPath string) error {
+	if !strings.HasSuffix(strings.ToLower(mkvPath), ".mkv") {
+		return errors.NewValidationError("file is not an MKV file", nil).WithContext("file_path", mkvPath)
+	}
+	if _, errStat := os.Stat(mkvPath); errStat != nil {
+		return errors.NewFileError(fmt.Sprintf("MKV file does not exist: %s", mkvPath), errStat)
+	}
+	return nil
 }
 
 // isEnglishTrack checks if a track is in English

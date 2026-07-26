@@ -30,8 +30,9 @@ type Config struct {
 	TargetLanguage string
 
 	// File paths
-	InputFile  string
-	OutputFile string
+	InputFile     string
+	OutputFile    string
+	SubtitleTrack int
 
 	// Processing options
 	StartLine   int
@@ -142,6 +143,33 @@ func NewConfig() *Config {
 		ProgressLog:    false,
 		QuietMode:      false,
 	}
+}
+
+// Clone returns an independent copy suitable for one translation task.
+func (c *Config) Clone() *Config {
+	if c == nil {
+		return nil
+	}
+
+	cloned := *c
+	cloned.APIKeys = append([]string(nil), c.APIKeys...)
+	if c.Temperature != nil {
+		temperature := *c.Temperature
+		cloned.Temperature = &temperature
+	}
+	if c.TopP != nil {
+		topP := *c.TopP
+		cloned.TopP = &topP
+	}
+	if c.TopK != nil {
+		topK := *c.TopK
+		cloned.TopK = &topK
+	}
+	if c.Resume != nil {
+		resume := *c.Resume
+		cloned.Resume = &resume
+	}
+	return &cloned
 }
 
 // LoadEnvironmentForProvider loads legacy environment variables for the selected provider.

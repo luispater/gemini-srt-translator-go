@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/spf13/cobra"
@@ -15,8 +16,10 @@ import (
 
 	"github.com/luispater/gemini-srt-translator-go/internal/logger"
 	"github.com/luispater/gemini-srt-translator-go/internal/translator"
+	"github.com/luispater/gemini-srt-translator-go/internal/video"
 	"github.com/luispater/gemini-srt-translator-go/pkg/config"
 	"github.com/luispater/gemini-srt-translator-go/pkg/errors"
+	"github.com/luispater/gemini-srt-translator-go/pkg/languages"
 )
 
 // rootCmd represents the base command when called without any subcommands
@@ -28,21 +31,18 @@ func newRootCommand() *cobra.Command {
 
 func newRootCommandWithConfig(commandConfig *config.Config) *cobra.Command {
 	rootCmd := &cobra.Command{
-		Use:   "gst [flags] <SRT_FILE|MKV_FILE>",
-		Short: "Translate SRT subtitle files or extract and translate subtitles from MKV files using AI",
+		Use:   "gst [flags] <SRT_FILE|MKV_FILE|GLOB>...",
+		Short: "Translate one or more SRT files or extract and translate subtitles from MKV files using AI",
 		Long: `Gemini SRT Translator is a powerful tool to translate subtitle files using AI providers (Gemini, OpenAI).
 Supports both SRT files and MKV files with embedded subtitles.
 Perfect for anyone needing fast, accurate, and customizable translations for videos, movies, and series.`,
 		SilenceUsage:  true, // Don't show usage on errors
 		SilenceErrors: true, // Don't show errors automatically (we handle them in main)
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Check if no arguments provided, show help
 			if len(args) == 0 {
 				return cmd.Help()
 			}
-			// Set input file from positional argument
-			commandConfig.InputFile = args[0]
-			return runTranslate(commandConfig)
+			return runTranslate(commandConfig, args)
 		},
 	}
 
@@ -185,14 +185,31 @@ func defaultModelForProvider(provider string, openAIProtocol string) string {
 	return "gemini-3.5-flash"
 }
 
-func runTranslate(commandConfig *config.Config) error {
-	commandConfig.Provider = config.NormalizeProvider(commandConfig.Provider)
+type translationTask struct {
+	filename   string
+	translator *translator.Translator
+	progress   *logger.ProgressBar
+	err        error
+}
 
-	// Set logger modes.
+func runTranslate(commandConfig *config.Config, inputPatterns []string) error {
+	commandConfig.Provider = config.NormalizeProvider(commandConfig.Provider)
 	logger.SetColorMode(commandConfig.UseColors)
 	logger.SetQuietMode(commandConfig.QuietMode)
 
-	// Validate required fields based on provider.
+	inputFiles, errExpandInputs := expandInputFiles(inputPatterns)
+	if errExpandInputs != nil {
+		return errExpandInputs
+	}
+	if len(inputFiles) > 1 && commandConfig.OutputFile != "" {
+		return errors.NewConfigurationError("--output-file can only be used with one input file", nil)
+	}
+	for _, inputFile := range inputFiles {
+		if !validateVideoFilePath(inputFile) {
+			return errors.NewFileError("invalid input file", nil).WithContext("file_path", inputFile)
+		}
+	}
+
 	if len(commandConfig.APIKeys) == 0 {
 		var prompt string
 		switch commandConfig.Provider {
@@ -206,23 +223,267 @@ func runTranslate(commandConfig *config.Config) error {
 		apiKey := getAPIKeyFromInput(prompt)
 		commandConfig.APIKeys = []string{apiKey}
 	}
-
 	if commandConfig.TargetLanguage == "" {
 		commandConfig.TargetLanguage = strings.TrimSpace(logger.InputPrompt("Enter target language: "))
 	}
 
-	// Validate file paths.
-	if commandConfig.InputFile != "" {
-		if !validateVideoFilePath(commandConfig.InputFile) {
-			return errors.NewFileError("invalid input file", nil).WithContext("file_path", commandConfig.InputFile)
+	tasks, errPrepareTasks := prepareTranslationTasks(commandConfig, inputFiles)
+	if errPrepareTasks != nil {
+		return errPrepareTasks
+	}
+	multiProgress := logger.NewMultiProgress()
+	for taskIndex := range tasks {
+		task := &tasks[taskIndex]
+		task.progress = multiProgress.AddBar(filepath.Base(task.filename))
+		if task.translator != nil {
+			task.translator.SetProgressBar(task.progress)
 		}
+		if task.err != nil {
+			task.progress.Fail(task.err)
+			saveTranslationTaskLog(task)
+			continue
+		}
+		task.progress.SetStatus("Ready")
 	}
 
-	// Create translator and perform translation.
-	t := translator.NewTranslator(commandConfig)
+	multiProgress.Start()
+	var waitGroup sync.WaitGroup
+	for taskIndex := range tasks {
+		task := &tasks[taskIndex]
+		if task.err != nil {
+			continue
+		}
+		waitGroup.Add(1)
+		go func(currentTask *translationTask) {
+			defer waitGroup.Done()
+			taskContext, cancelTask := context.WithCancel(context.Background())
+			defer cancelTask()
 
-	ctx := context.Background()
-	return t.Translate(ctx)
+			currentTask.progress.SetStatus("Starting")
+			if errTranslate := currentTask.translator.Translate(taskContext); errTranslate != nil {
+				currentTask.err = errTranslate
+				currentTask.progress.Fail(errTranslate)
+				saveTranslationTaskLog(currentTask)
+				return
+			}
+			currentTask.progress.Complete()
+			saveTranslationTaskLog(currentTask)
+		}(task)
+	}
+	waitGroup.Wait()
+	multiProgress.Stop()
+
+	var failureMessages []string
+	for _, task := range tasks {
+		if task.err != nil {
+			failureMessages = append(failureMessages, fmt.Sprintf("%s: %v", task.filename, task.err))
+		}
+	}
+	if len(failureMessages) > 0 {
+		return fmt.Errorf("%d translation task(s) failed:\n%s", len(failureMessages), strings.Join(failureMessages, "\n"))
+	}
+	return nil
+}
+
+func saveTranslationTaskLog(task *translationTask) {
+	if task.translator == nil {
+		return
+	}
+	if errSaveLog := task.translator.SaveProgressLog(); errSaveLog != nil {
+		task.progress.AddMessage(fmt.Sprintf("Failed to save progress log: %v", errSaveLog), logger.Yellow)
+		if task.err != nil {
+			task.progress.Fail(task.err)
+		} else {
+			task.progress.Complete()
+		}
+	}
+}
+
+func prepareTranslationTasks(commandConfig *config.Config, inputFiles []string) ([]translationTask, error) {
+	tasks := make([]translationTask, 0, len(inputFiles))
+	for _, inputFile := range inputFiles {
+		taskConfig := commandConfig.Clone()
+		taskConfig.InputFile = inputFile
+
+		task := translationTask{filename: inputFile}
+		if strings.EqualFold(filepath.Ext(inputFile), ".mkv") {
+			subtitleTrack, errSelectTrack := selectSubtitleTrack(inputFile)
+			if errSelectTrack != nil {
+				task.err = errSelectTrack
+				task.translator = translator.NewTranslator(taskConfig)
+				tasks = append(tasks, task)
+				continue
+			}
+			taskConfig.SubtitleTrack = subtitleTrack
+		}
+		task.translator = translator.NewTranslator(taskConfig)
+		tasks = append(tasks, task)
+	}
+
+	if errValidatePaths := validateTranslationTaskPaths(tasks); errValidatePaths != nil {
+		return nil, errValidatePaths
+	}
+	for taskIndex := range tasks {
+		task := &tasks[taskIndex]
+		if task.err != nil {
+			continue
+		}
+		if errPrepare := task.translator.Prepare(); errPrepare != nil {
+			task.err = errPrepare
+		}
+	}
+	return tasks, nil
+}
+
+func validateTranslationTaskPaths(tasks []translationTask) error {
+	inputOwners := make(map[string]string)
+	for _, task := range tasks {
+		canonicalInput, errCanonicalInput := canonicalPath(task.filename)
+		if errCanonicalInput != nil {
+			return errors.NewFileError("failed to resolve input path", errCanonicalInput).WithContext("file_path", task.filename)
+		}
+		inputOwners[canonicalInput] = task.filename
+	}
+
+	artifactOwners := make(map[string]string)
+	for _, task := range tasks {
+		if task.translator == nil {
+			continue
+		}
+		for _, artifactPath := range task.translator.ArtifactPaths() {
+			canonicalArtifact, errCanonicalArtifact := canonicalPath(artifactPath)
+			if errCanonicalArtifact != nil {
+				return errors.NewFileError("failed to resolve output path", errCanonicalArtifact).WithContext("file_path", artifactPath)
+			}
+			if inputOwner, conflictsWithInput := inputOwners[canonicalArtifact]; conflictsWithInput {
+				return errors.NewConfigurationError("translation artifact conflicts with an input file", nil).WithContext("artifact_path", artifactPath).WithContext("input_file", inputOwner)
+			}
+			if artifactOwner, conflictsWithTask := artifactOwners[canonicalArtifact]; conflictsWithTask {
+				return errors.NewConfigurationError("translation tasks would write the same artifact", nil).WithContext("artifact_path", artifactPath).WithContext("first_input", artifactOwner).WithContext("second_input", task.filename)
+			}
+			artifactOwners[canonicalArtifact] = task.filename
+		}
+	}
+	return nil
+}
+
+func canonicalPath(filePath string) (string, error) {
+	absolutePath, errAbsolutePath := filepath.Abs(filePath)
+	if errAbsolutePath != nil {
+		return "", errAbsolutePath
+	}
+	absolutePath = filepath.Clean(absolutePath)
+
+	currentPath := absolutePath
+	var unresolvedParts []string
+	for {
+		resolvedPath, errResolvePath := filepath.EvalSymlinks(currentPath)
+		if errResolvePath == nil {
+			for unresolvedIndex := len(unresolvedParts) - 1; unresolvedIndex >= 0; unresolvedIndex-- {
+				resolvedPath = filepath.Join(resolvedPath, unresolvedParts[unresolvedIndex])
+			}
+			return filepath.Clean(resolvedPath), nil
+		}
+		parentPath := filepath.Dir(currentPath)
+		if parentPath == currentPath {
+			return absolutePath, nil
+		}
+		unresolvedParts = append(unresolvedParts, filepath.Base(currentPath))
+		currentPath = parentPath
+	}
+}
+
+func expandInputFiles(inputPatterns []string) ([]string, error) {
+	seenFiles := make(map[string]struct{})
+	var inputFiles []string
+	for _, inputPattern := range inputPatterns {
+		var matches []string
+		if _, errStatLiteral := os.Stat(inputPattern); errStatLiteral == nil {
+			matches = []string{inputPattern}
+		} else {
+			globMatches, errGlob := filepath.Glob(inputPattern)
+			if errGlob != nil {
+				return nil, errors.NewFileError("invalid input glob", errGlob).WithContext("pattern", inputPattern)
+			}
+			matches = globMatches
+		}
+		if len(matches) == 0 {
+			if strings.ContainsAny(inputPattern, "*?[") {
+				return nil, errors.NewFileError("input glob matched no files", nil).WithContext("pattern", inputPattern)
+			}
+			matches = []string{inputPattern}
+		}
+		for _, match := range matches {
+			cleanedPath := filepath.Clean(match)
+			canonicalInput, errCanonicalInput := canonicalPath(cleanedPath)
+			if errCanonicalInput != nil {
+				return nil, errors.NewFileError("failed to resolve input path", errCanonicalInput).WithContext("file_path", cleanedPath)
+			}
+			if _, exists := seenFiles[canonicalInput]; exists {
+				continue
+			}
+			seenFiles[canonicalInput] = struct{}{}
+			inputFiles = append(inputFiles, cleanedPath)
+		}
+	}
+	if len(inputFiles) == 0 {
+		return nil, errors.NewValidationError("please provide at least one input file", nil)
+	}
+	return inputFiles, nil
+}
+
+func selectSubtitleTrack(mkvPath string) (int, error) {
+	tracks, errInspectTracks := video.InspectSubtitleTracks(mkvPath)
+	if errInspectTracks != nil {
+		return 0, errInspectTracks
+	}
+
+	logger.Highlight(fmt.Sprintf("\nSource subtitles for %s", mkvPath))
+	if len(tracks) == 1 {
+		logger.Info(fmt.Sprintf("Only one subtitle track found; selecting %s automatically.", subtitleTrackDescription(tracks[0])))
+		return tracks[0].Number, nil
+	}
+
+	logger.Info("Available subtitle tracks:")
+	for trackIndex, track := range tracks {
+		logger.Info(fmt.Sprintf("[%d] %s", trackIndex+1, subtitleTrackDescription(track)))
+	}
+
+	defaultTrack := video.SelectBestSubtitleTrack(tracks)
+	defaultIndex := 0
+	if defaultTrack != nil {
+		for trackIndex, track := range tracks {
+			if track.Number == defaultTrack.Number {
+				defaultIndex = trackIndex
+				break
+			}
+		}
+	}
+	for {
+		input := strings.TrimSpace(logger.InputPrompt(fmt.Sprintf("Select source subtitle track for %s [%d]: ", filepath.Base(mkvPath), defaultIndex+1)))
+		if input == "" {
+			return tracks[defaultIndex].Number, nil
+		}
+		selection, errSelection := strconv.Atoi(input)
+		if errSelection == nil && selection >= 1 && selection <= len(tracks) {
+			return tracks[selection-1].Number, nil
+		}
+		logger.Warning("Invalid selection. Enter a valid number.")
+	}
+}
+
+func subtitleTrackDescription(track video.SubtitleTrack) string {
+	language := strings.TrimSpace(track.Language)
+	if bcp47 := languages.BCP47FromMKV(language); bcp47 != "" {
+		language = bcp47
+	}
+	if language == "" {
+		language = "undetermined"
+	}
+	if name := strings.TrimSpace(track.Name); name != "" {
+		return fmt.Sprintf("Language: %s, Name: %s, Codec: %s", language, name, track.Codec)
+	}
+	return fmt.Sprintf("Language: %s, Codec: %s", language, track.Codec)
 }
 
 func selectModelInteractive(commandConfig *config.Config) error {
@@ -245,7 +506,10 @@ func selectModelInteractive(commandConfig *config.Config) error {
 	}
 
 	for {
-		input := logger.InputPrompt("\nEnter model number: ")
+		input, errPromptModel := logger.InputPromptWithError("\nEnter model number: ")
+		if errPromptModel != nil {
+			return errors.NewValidationError("cannot select a model without interactive input", errPromptModel)
+		}
 		choice, errAtoi := strconv.Atoi(strings.TrimSpace(input))
 		if errAtoi != nil || choice < 1 || choice > len(models) {
 			logger.Error("Invalid choice. Please try again.")
@@ -273,8 +537,13 @@ func getAPIKeyFromInput(prompt string) string {
 }
 
 func validateVideoFilePath(filePath string) bool {
-	if _, errStat := os.Stat(filePath); os.IsNotExist(errStat) {
-		logger.Error(fmt.Sprintf("File does not exist: %s", filePath))
+	fileInfo, errStat := os.Stat(filePath)
+	if errStat != nil {
+		logger.Error(fmt.Sprintf("Cannot access file %s: %v", filePath, errStat))
+		return false
+	}
+	if !fileInfo.Mode().IsRegular() {
+		logger.Error(fmt.Sprintf("Input path is not a regular file: %s", filePath))
 		return false
 	}
 

@@ -4,6 +4,7 @@ go 1.24.0
 
 require (
 	github.com/luispater/matroska-go v1.2.4
+	github.com/mattn/go-runewidth v0.0.19
 	github.com/openai/openai-go v1.12.0
 	github.com/spf13/cobra v1.9.1
 	golang.org/x/term v0.33.0
@@ -14,6 +15,7 @@ require (
 	cloud.google.com/go v0.121.4 // indirect
 	cloud.google.com/go/auth v0.16.3 // indirect
 	cloud.google.com/go/compute/metadata v0.7.0 // indirect
+	github.com/clipperhouse/uax29/v2 v2.2.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect

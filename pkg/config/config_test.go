@@ -186,6 +186,39 @@ func TestNewConfigUsesProviderSpecificLegacyEnvironment(t *testing.T) {
 	}
 }
 
+func TestConfigCloneCreatesIndependentTaskConfiguration(t *testing.T) {
+	temperature := float32(0.7)
+	topP := float32(0.8)
+	topK := float32(20)
+	resume := true
+	original := &Config{
+		APIKeys:     []string{"key-1", "key-2"},
+		InputFile:   "first.srt",
+		Temperature: &temperature,
+		TopP:        &topP,
+		TopK:        &topK,
+		Resume:      &resume,
+	}
+
+	cloned := original.Clone()
+	cloned.APIKeys[0] = "changed"
+	cloned.InputFile = "second.srt"
+	*cloned.Temperature = 0.1
+	*cloned.TopP = 0.2
+	*cloned.TopK = 1
+	*cloned.Resume = false
+
+	if original.APIKeys[0] != "key-1" {
+		t.Errorf("Original API keys changed to %v", original.APIKeys)
+	}
+	if original.InputFile != "first.srt" {
+		t.Errorf("Original input file changed to %q", original.InputFile)
+	}
+	if *original.Temperature != 0.7 || *original.TopP != 0.8 || *original.TopK != 20 || !*original.Resume {
+		t.Error("Clone shares pointer fields with the original configuration")
+	}
+}
+
 func TestParseAPIKeys(t *testing.T) {
 	tests := []struct {
 		name     string

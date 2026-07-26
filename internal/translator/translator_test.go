@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/luispater/gemini-srt-translator-go/internal/logger"
 	"github.com/luispater/gemini-srt-translator-go/internal/providers"
 	"github.com/luispater/gemini-srt-translator-go/pkg/config"
 	"github.com/luispater/gemini-srt-translator-go/pkg/srt"
@@ -487,6 +488,80 @@ func TestTranslatorSaveProgressPersistsResponsesContext(t *testing.T) {
 	}
 }
 
+func TestTranslatorRestartCheckpointRollsBackArtifactsOnFailure(t *testing.T) {
+	tempDir := t.TempDir()
+	outputPath := filepath.Join(tempDir, "output.srt")
+	oldOutput := []byte("previous translation")
+	if errWriteOld := os.WriteFile(outputPath, oldOutput, 0644); errWriteOld != nil {
+		t.Fatalf("Failed to create previous output: %v", errWriteOld)
+	}
+	metadataPath := filepath.Join(tempDir, "output.srt.gst-meta.json")
+	translator := &Translator{
+		config:            &config.Config{InputFile: filepath.Join(tempDir, "input.mkv"), SubtitleTrack: 2},
+		outputFile:        outputPath,
+		progressFile:      filepath.Join(tempDir, "missing", "input.progress"),
+		metadataFile:      metadataPath,
+		sourceFingerprint: "source-sha256",
+		restartPending:    true,
+	}
+
+	errSave := translator.saveProgress(1, []srt.Subtitle{{Index: 1, Content: "new translation"}}, nil)
+	if errSave == nil {
+		t.Fatal("saveProgress() returned no error for an unavailable progress directory")
+	}
+	restoredOutput, errReadOutput := os.ReadFile(outputPath)
+	if errReadOutput != nil {
+		t.Fatalf("Failed to read restored output: %v", errReadOutput)
+	}
+	if string(restoredOutput) != string(oldOutput) {
+		t.Errorf("Output was not rolled back: got %q, want %q", restoredOutput, oldOutput)
+	}
+	if _, errStatMetadata := os.Stat(metadataPath); !os.IsNotExist(errStatMetadata) {
+		t.Errorf("New metadata was not rolled back: %v", errStatMetadata)
+	}
+	if !translator.restartPending {
+		t.Error("Failed checkpoint cleared restartPending")
+	}
+}
+
+func TestTranslatorSaveProgressPersistsMKVSourceMetadata(t *testing.T) {
+	tempDir := t.TempDir()
+	inputPath := filepath.Join(tempDir, "movie.mkv")
+	metadataPath := filepath.Join(tempDir, "movie.srt.gst-meta.json")
+	translator := &Translator{
+		config: &config.Config{
+			InputFile:     inputPath,
+			SubtitleTrack: 4,
+		},
+		outputFile:        filepath.Join(tempDir, "movie.srt"),
+		progressFile:      filepath.Join(tempDir, "movie.progress"),
+		metadataFile:      metadataPath,
+		sourceFingerprint: "source-sha256",
+	}
+
+	if errSave := translator.saveProgress(1, nil, nil); errSave != nil {
+		t.Fatalf("saveProgress() error = %v", errSave)
+	}
+	metadataData, errReadMetadata := os.ReadFile(metadataPath)
+	if errReadMetadata != nil {
+		t.Fatalf("Failed to read translation metadata: %v", errReadMetadata)
+	}
+	var metadata translationMetadata
+	if errUnmarshal := json.Unmarshal(metadataData, &metadata); errUnmarshal != nil {
+		t.Fatalf("Failed to decode translation metadata: %v", errUnmarshal)
+	}
+	if metadata.InputFile != inputPath || metadata.SubtitleTrack != 4 || metadata.SourceFingerprint != "source-sha256" {
+		t.Errorf("Translation metadata = %+v", metadata)
+	}
+	if matches, reason := translator.outputMetadataMatchesSource(); !matches {
+		t.Errorf("outputMetadataMatchesSource() = false, reason %q", reason)
+	}
+	translator.config.SubtitleTrack = 5
+	if matches, _ := translator.outputMetadataMatchesSource(); matches {
+		t.Error("outputMetadataMatchesSource() accepted a different subtitle track")
+	}
+}
+
 func TestTranslatorCheckSavedProgressRestoresOnlyMatchingResponsesContext(t *testing.T) {
 	tempDir := t.TempDir()
 	inputPath := filepath.Join(tempDir, "input.srt")
@@ -627,11 +702,14 @@ func TestTranslatorCheckSavedProgressRestoresLineOnePromptCacheKey(t *testing.T)
 	if newTaskTranslator.config.OpenAIPromptCacheKey != "" {
 		t.Errorf("new task restored prompt cache key %q", newTaskTranslator.config.OpenAIPromptCacheKey)
 	}
-	if _, errStatProgress := os.Stat(progressPath); !os.IsNotExist(errStatProgress) {
-		t.Errorf("progress file still exists after starting a new task: %v", errStatProgress)
+	if !newTaskTranslator.restartPending {
+		t.Error("new task did not schedule a safe restart")
 	}
-	if _, errStatOutput := os.Stat(outputPath); !os.IsNotExist(errStatOutput) {
-		t.Errorf("output file still exists after starting a new task: %v", errStatOutput)
+	if _, errStatProgress := os.Stat(progressPath); errStatProgress != nil {
+		t.Errorf("progress file was removed before the first new checkpoint: %v", errStatProgress)
+	}
+	if _, errStatOutput := os.Stat(outputPath); errStatOutput != nil {
+		t.Errorf("output file was removed before the first new checkpoint: %v", errStatOutput)
 	}
 }
 
@@ -857,6 +935,114 @@ func TestTranslatorPerformTranslationStopsWithoutAdvancingProgressOrContextOnOut
 	}
 	if len(progress.Context) != len(initialContext) || progress.Context[0].Content != initialContext[0].Content {
 		t.Errorf("saved context advanced after output write failure: %+v", progress.Context)
+	}
+}
+
+func TestTranslatorRejectsProgressFromDifferentSubtitleTrack(t *testing.T) {
+	tempDir := t.TempDir()
+	inputPath := filepath.Join(tempDir, "movie.mkv")
+	outputPath := filepath.Join(tempDir, "movie.en.srt")
+	progressPath := filepath.Join(tempDir, "movie.progress")
+	extractedPath := filepath.Join(tempDir, "movie_extracted.srt")
+	progressData, errMarshal := json.Marshal(ProgressInfo{
+		Line:          5,
+		InputFile:     inputPath,
+		SubtitleTrack: 1,
+	})
+	if errMarshal != nil {
+		t.Fatalf("Failed to marshal progress: %v", errMarshal)
+	}
+	for filePath, content := range map[string][]byte{
+		outputPath:    []byte("translated"),
+		progressPath:  progressData,
+		extractedPath: []byte("extracted"),
+	} {
+		if errWrite := os.WriteFile(filePath, content, 0644); errWrite != nil {
+			t.Fatalf("Failed to create %s: %v", filePath, errWrite)
+		}
+	}
+
+	translator := &Translator{
+		config: &config.Config{
+			InputFile:     inputPath,
+			SubtitleTrack: 2,
+		},
+		outputFile:   outputPath,
+		progressFile: progressPath,
+	}
+	translator.checkSavedProgress()
+
+	if translator.config.StartLine != 0 {
+		t.Errorf("Start line = %d, want 0 after track mismatch", translator.config.StartLine)
+	}
+	if !translator.restartPending {
+		t.Error("Track mismatch did not schedule a safe restart")
+	}
+	for _, filePath := range []string{outputPath, progressPath} {
+		if _, errStat := os.Stat(filePath); errStat != nil {
+			t.Errorf("Previous artifact %s was removed before translation: %v", filePath, errStat)
+		}
+	}
+	if _, errStatExtracted := os.Stat(extractedPath); errStatExtracted != nil {
+		t.Errorf("Unowned extracted file was removed after track mismatch: %v", errStatExtracted)
+	}
+}
+
+func TestTranslatorLoadSubtitlesFailsWithoutInteractiveStartLine(t *testing.T) {
+	tempDir := t.TempDir()
+	inputPath := filepath.Join(tempDir, "input.srt")
+	outputPath := filepath.Join(tempDir, "output.srt")
+	srtContent := "1\n00:00:00,000 --> 00:00:01,000\nSubtitle\n"
+	for _, filePath := range []string{inputPath, outputPath} {
+		if errWrite := os.WriteFile(filePath, []byte(srtContent), 0644); errWrite != nil {
+			t.Fatalf("Failed to create subtitle file: %v", errWrite)
+		}
+	}
+	translator := &Translator{
+		config:     &config.Config{InputFile: inputPath, BatchSize: 1},
+		outputFile: outputPath,
+	}
+
+	logger.SetQuietMode(true)
+	defer logger.SetQuietMode(false)
+	if errLoad := translator.loadSubtitles(inputPath); errLoad == nil || !strings.Contains(errLoad.Error(), "--start-line") {
+		t.Fatalf("loadSubtitles() error = %v, want non-interactive start line guidance", errLoad)
+	}
+}
+
+func TestTranslatorLoadSubtitlesRestartsWhenResumeOutputIsMissing(t *testing.T) {
+	tempDir := t.TempDir()
+	inputPath := filepath.Join(tempDir, "input.srt")
+	progressPath := filepath.Join(tempDir, "input.progress")
+	inputContent := "1\n00:00:00,000 --> 00:00:01,000\nSource\n"
+	if errWriteInput := os.WriteFile(inputPath, []byte(inputContent), 0644); errWriteInput != nil {
+		t.Fatalf("Failed to create input: %v", errWriteInput)
+	}
+	if errWriteProgress := os.WriteFile(progressPath, []byte("progress"), 0644); errWriteProgress != nil {
+		t.Fatalf("Failed to create progress: %v", errWriteProgress)
+	}
+	translator := &Translator{
+		config:       &config.Config{InputFile: inputPath, StartLine: 5, BatchSize: 1},
+		outputFile:   filepath.Join(tempDir, "missing-output.srt"),
+		progressFile: progressPath,
+		metadataFile: filepath.Join(tempDir, "missing-output.srt.gst-meta.json"),
+		context:      []providers.ContextMessage{{Role: "user", Content: "stale context"}},
+	}
+
+	if errLoad := translator.loadSubtitles(inputPath); errLoad != nil {
+		t.Fatalf("loadSubtitles() error = %v", errLoad)
+	}
+	if translator.config.StartLine != 1 {
+		t.Errorf("Start line = %d, want 1", translator.config.StartLine)
+	}
+	if len(translator.context) != 0 {
+		t.Errorf("Stale context was retained: %+v", translator.context)
+	}
+	if !translator.restartPending {
+		t.Error("Missing resume output did not schedule a safe restart")
+	}
+	if _, errStatProgress := os.Stat(progressPath); errStatProgress != nil {
+		t.Errorf("Stale progress was removed before a translated checkpoint: %v", errStatProgress)
 	}
 }
 

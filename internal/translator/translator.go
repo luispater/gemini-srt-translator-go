@@ -32,7 +32,14 @@ type ProgressInfo struct {
 	Model                  string                     `json:"model,omitempty"`
 	TranslationFingerprint string                     `json:"translation_fingerprint,omitempty"`
 	PromptCacheKey         string                     `json:"prompt_cache_key,omitempty"`
+	SubtitleTrack          int                        `json:"subtitle_track,omitempty"`
 	Context                []providers.ContextMessage `json:"context,omitempty"`
+}
+
+type translationMetadata struct {
+	InputFile         string `json:"input_file"`
+	SubtitleTrack     int    `json:"subtitle_track"`
+	SourceFingerprint string `json:"source_fingerprint"`
 }
 
 type progressTranslationConfig struct {
@@ -65,19 +72,26 @@ func (p *ProgressBarWrapper) SetThinking(thinking bool) {
 
 // Translator handles the subtitle translation process
 type Translator struct {
-	config           *config.Config
-	provider         providers.TranslationProvider
-	batchNumber      int
-	tokenLimit       int32
-	tokenCount       int32
-	translatedBatch  []srt.SubtitleObject
-	outputFile       string
-	progressFile     string
-	logFilePath      string
-	thoughtsFilePath string
-	context          []providers.ContextMessage
-	extractedSRTFile string   // Path to SRT file extracted from MKV
-	cleanupFiles     []string // Files to clean up after translation
+	config              *config.Config
+	provider            providers.TranslationProvider
+	batchNumber         int
+	tokenLimit          int32
+	tokenCount          int32
+	translatedBatch     []srt.SubtitleObject
+	outputFile          string
+	progressFile        string
+	logFilePath         string
+	thoughtsFilePath    string
+	metadataFile        string
+	sourceFingerprint   string
+	context             []providers.ContextMessage
+	progressBar         *logger.ProgressBar
+	originalSubtitles   []srt.Subtitle
+	translatedSubtitles []srt.Subtitle
+	prepared            bool
+	restartPending      bool
+	extractedSRTFile    string   // Path to SRT file extracted from MKV
+	cleanupFiles        []string // Files to clean up after translation
 }
 
 // NewTranslator creates a new translator instance
@@ -147,8 +161,34 @@ func NewTranslator(cfg *config.Config) *Translator {
 		progressFile:     progressFile,
 		logFilePath:      logFilePath,
 		thoughtsFilePath: thoughtsFilePath,
+		metadataFile:     outputFile + ".gst-meta.json",
 		context:          []providers.ContextMessage{},
 	}
+}
+
+// SetProgressBar assigns a centrally managed progress bar to this task.
+func (t *Translator) SetProgressBar(progressBar *logger.ProgressBar) {
+	t.progressBar = progressBar
+}
+
+// ArtifactPaths returns files that may be written by this translation task.
+func (t *Translator) ArtifactPaths() []string {
+	paths := []string{t.outputFile, t.progressFile}
+	if t.config.ProgressLog {
+		paths = append(paths, t.logFilePath)
+	}
+	if strings.EqualFold(filepath.Ext(t.config.InputFile), ".mkv") {
+		paths = append(paths, t.metadataFile)
+	}
+	return paths
+}
+
+// SaveProgressLog writes this task's isolated progress log when enabled.
+func (t *Translator) SaveProgressLog() error {
+	if !t.config.ProgressLog || t.progressBar == nil {
+		return nil
+	}
+	return t.progressBar.SaveTaskLogsToFile(t.logFilePath)
 }
 
 // GetModels returns available models from the provider
@@ -159,41 +199,184 @@ func (t *Translator) GetModels(ctx context.Context) ([]string, error) {
 	return t.provider.GetModels(ctx)
 }
 
-// Translate performs the main translation process
-func (t *Translator) Translate(ctx context.Context) error {
-	// Validate prerequisites
+// Prepare performs all file operations and interactive prompts before translation starts.
+func (t *Translator) Prepare() (returnErr error) {
+	if t.prepared {
+		return nil
+	}
+	defer func() {
+		if returnErr != nil {
+			t.cleanup()
+		}
+	}()
+
 	if errValidatePrerequisites := t.validatePrerequisites(); errValidatePrerequisites != nil {
 		return errValidatePrerequisites
 	}
-
-	// Validate configuration
 	if errValidateConfig := t.validateConfig(); errValidateConfig != nil {
 		return errValidateConfig
 	}
 
-	// Check saved progress
 	t.checkSavedProgress()
 
-	// Initialize provider task state before model validation or translation requests.
+	srtFile, errPrepareSRT := t.prepareSRTFile()
+	if errPrepareSRT != nil {
+		return errPrepareSRT
+	}
+	if errLoadSubtitles := t.loadSubtitles(srtFile); errLoadSubtitles != nil {
+		return errLoadSubtitles
+	}
+
+	t.prepared = true
+	return nil
+}
+
+// Translate performs the main translation process.
+func (t *Translator) Translate(ctx context.Context) error {
+	if errPrepare := t.Prepare(); errPrepare != nil {
+		return errPrepare
+	}
+	defer t.cleanup()
+
+	t.setProgressStatus("Initializing provider")
 	if errInitialize := t.initializeTranslationTask(); errInitialize != nil {
 		return errInitialize
 	}
 
-	// Validate model availability
+	t.setProgressStatus("Validating model")
 	if errValidateModel := t.validateModel(ctx); errValidateModel != nil {
 		return errValidateModel
 	}
 
-	// Get token limit
+	t.setProgressStatus("Reading model limits")
 	if errGetTokenLimit := t.getTokenLimit(ctx); errGetTokenLimit != nil {
 		return errGetTokenLimit
 	}
 
-	// Perform translation
-	if t.config.InputFile != "" {
-		return t.performTranslation(ctx)
+	if t.config.InputFile == "" {
+		return fmt.Errorf("no input file provided")
 	}
-	return fmt.Errorf("no input file provided")
+	return t.performTranslation(ctx)
+}
+
+func (t *Translator) loadSubtitles(srtFile string) error {
+	originalData, errReadOriginal := os.ReadFile(srtFile)
+	if errReadOriginal != nil {
+		return errors.NewFileError("failed to read input file", errReadOriginal).WithContext("file_path", srtFile)
+	}
+
+	sourceHash := sha256.Sum256(originalData)
+	t.sourceFingerprint = hex.EncodeToString(sourceHash[:])
+	originalSubtitles, errParseOriginal := srt.ParseSRT(string(originalData))
+	if errParseOriginal != nil {
+		return errors.NewFileError("failed to parse SRT file", errParseOriginal).WithContext("file_path", srtFile)
+	}
+
+	loadExistingOutput := false
+	if _, errStatOutput := os.Stat(t.outputFile); errStatOutput == nil {
+		loadExistingOutput = true
+		if strings.EqualFold(filepath.Ext(t.config.InputFile), ".mkv") {
+			if matchesSource, mismatchReason := t.outputMetadataMatchesSource(); !matchesSource {
+				logger.Warning(fmt.Sprintf("[%s] Existing translation source cannot be verified: %s", filepath.Base(t.config.InputFile), mismatchReason))
+				reuseAnswer := strings.ToLower(strings.TrimSpace(logger.InputPrompt("Reuse the existing translation anyway? (y/n): ")))
+				loadExistingOutput = reuseAnswer == "y" || reuseAnswer == "yes"
+				if !loadExistingOutput {
+					t.restartFromBeginning()
+				}
+			}
+		}
+	}
+
+	if !loadExistingOutput && t.config.StartLine > 1 {
+		logger.Warning(fmt.Sprintf("[%s] Saved progress has no matching output file. Starting from the beginning.", filepath.Base(t.config.InputFile)))
+		t.restartFromBeginning()
+	}
+
+	var translatedSubtitles []srt.Subtitle
+	if loadExistingOutput {
+		translatedData, errReadTranslated := os.ReadFile(t.outputFile)
+		if errReadTranslated != nil {
+			logger.Warning(fmt.Sprintf("Failed to read existing translation. Starting from the beginning: %v", errReadTranslated))
+			t.restartFromBeginning()
+		} else {
+			translatedSubtitles, errReadTranslated = srt.ParseSRT(string(translatedData))
+			if errReadTranslated != nil {
+				logger.Warning(fmt.Sprintf("Failed to parse existing translation. Starting from the beginning: %v", errReadTranslated))
+				t.restartFromBeginning()
+			} else {
+				logger.Info(fmt.Sprintf("Translated file %s already exists. Loading existing translation...\n", t.outputFile))
+				if t.config.StartLine == 0 {
+					for {
+						input, errPromptLine := logger.InputPromptWithError(fmt.Sprintf("[%s] Enter the line number to start from (1 to %d): ", filepath.Base(t.config.InputFile), len(originalSubtitles)))
+						if errPromptLine != nil {
+							return errors.NewValidationError("cannot select a start line without interactive input; use --start-line, --resume, or --no-resume", errPromptLine).WithContext("file_path", t.config.InputFile)
+						}
+						startLine, errParseLine := strconv.Atoi(strings.TrimSpace(input))
+						if errParseLine != nil || startLine < 1 || startLine > len(originalSubtitles) {
+							logger.Warning(fmt.Sprintf("Line number must be between 1 and %d. Please try again.", len(originalSubtitles)))
+							continue
+						}
+						t.config.StartLine = startLine
+						break
+					}
+				}
+			}
+		}
+	}
+
+	if len(translatedSubtitles) == 0 {
+		translatedSubtitles = make([]srt.Subtitle, len(originalSubtitles))
+		copy(translatedSubtitles, originalSubtitles)
+		t.config.StartLine = 1
+	}
+	if len(originalSubtitles) != len(translatedSubtitles) {
+		return errors.NewValidationError("number of lines of existing translated file does not match the number of lines in the original file", nil).WithContext("original_count", len(originalSubtitles)).WithContext("translated_count", len(translatedSubtitles))
+	}
+	if t.config.StartLine > len(originalSubtitles) || t.config.StartLine < 1 {
+		return errors.NewValidationError(fmt.Sprintf("start line must be between 1 and %d", len(originalSubtitles)), nil).WithContext("start_line", t.config.StartLine).WithContext("max_lines", len(originalSubtitles))
+	}
+	if len(originalSubtitles) < t.config.BatchSize {
+		t.config.BatchSize = len(originalSubtitles)
+	}
+
+	t.originalSubtitles = originalSubtitles
+	t.translatedSubtitles = translatedSubtitles
+	return nil
+}
+
+func (t *Translator) outputMetadataMatchesSource() (bool, string) {
+	metadataData, errReadMetadata := os.ReadFile(t.metadataFile)
+	if errReadMetadata != nil {
+		return false, "metadata is missing"
+	}
+	var metadata translationMetadata
+	if errUnmarshalMetadata := json.Unmarshal(metadataData, &metadata); errUnmarshalMetadata != nil {
+		return false, "metadata is invalid"
+	}
+	if filepath.Clean(metadata.InputFile) != filepath.Clean(t.config.InputFile) {
+		return false, "input file does not match"
+	}
+	if metadata.SubtitleTrack != t.config.SubtitleTrack {
+		return false, fmt.Sprintf("subtitle track %d does not match selected track %d", metadata.SubtitleTrack, t.config.SubtitleTrack)
+	}
+	if metadata.SourceFingerprint != t.sourceFingerprint {
+		return false, "source subtitles have changed"
+	}
+	return true, ""
+}
+
+func (t *Translator) setProgressStatus(status string) {
+	if t.progressBar != nil {
+		t.progressBar.SetStatus(status)
+	}
+}
+
+func (t *Translator) reportProgressMessage(message, color string) {
+	if t.progressBar != nil {
+		t.progressBar.AddMessage(message, color)
+		return
+	}
+	logger.Warning(message)
 }
 
 // validatePrerequisites checks if all prerequisites are met
@@ -274,12 +457,17 @@ func (t *Translator) checkSavedProgress() {
 		logger.Warning("Ignoring saved progress with an invalid line number.")
 		return
 	}
+	if progress.SubtitleTrack != 0 && t.config.SubtitleTrack != 0 && progress.SubtitleTrack != t.config.SubtitleTrack {
+		logger.Warning(fmt.Sprintf("Saved progress uses subtitle track %d, but track %d was selected. Starting from the beginning.", progress.SubtitleTrack, t.config.SubtitleTrack))
+		t.restartFromBeginning()
+		return
+	}
 
 	shouldResume := true
 	if progress.Line > 1 {
 		var resume string
 		if t.config.Resume == nil {
-			resume = strings.ToLower(strings.TrimSpace(logger.InputPrompt("Found saved progress. Resume? (y/n): ")))
+			resume = strings.ToLower(strings.TrimSpace(logger.InputPrompt(fmt.Sprintf("[%s] Found saved progress at line %d. Resume? (y/n): ", filepath.Base(t.config.InputFile), progress.Line))))
 		} else if *t.config.Resume {
 			resume = "y"
 		} else {
@@ -305,23 +493,15 @@ func (t *Translator) checkSavedProgress() {
 	}
 
 	logger.Info("Starting from the beginning")
+	t.restartFromBeginning()
+}
+
+func (t *Translator) restartFromBeginning() {
+	t.config.StartLine = 0
+	t.context = nil
+	t.restartPending = true
 	if t.usesOpenAIResponses() {
 		t.config.OpenAIPromptCacheKey = ""
-	}
-	// Remove the existing output file.
-	if errRemoveOutput := os.Remove(t.outputFile); errRemoveOutput != nil && !os.IsNotExist(errRemoveOutput) {
-		logger.Warning(fmt.Sprintf("Failed to remove output file: %v", errRemoveOutput))
-	}
-	// Remove the existing progress file.
-	if errRemoveProgress := os.Remove(t.progressFile); errRemoveProgress != nil && !os.IsNotExist(errRemoveProgress) {
-		logger.Warning(fmt.Sprintf("Failed to remove progress file: %v", errRemoveProgress))
-	}
-	// For MKV files, also remove the extracted SRT file when restarting.
-	if strings.HasSuffix(strings.ToLower(t.config.InputFile), ".mkv") {
-		extractedPath := t.getExtractedSRTPath()
-		if errRemoveExtracted := os.Remove(extractedPath); errRemoveExtracted != nil && !os.IsNotExist(errRemoveExtracted) {
-			logger.Warning(fmt.Sprintf("Failed to remove extracted SRT file: %v", errRemoveExtracted))
-		}
 	}
 }
 
@@ -333,19 +513,47 @@ func (t *Translator) initializeTranslationTask() error {
 	return initializer.InitializeTranslationTask()
 }
 
+type artifactBackup struct {
+	path       string
+	backupPath string
+}
+
 // saveProgress writes translated output before recording the matching progress and context.
-func (t *Translator) saveProgress(line int, translatedSubtitles []srt.Subtitle, contextMessages []providers.ContextMessage) error {
+func (t *Translator) saveProgress(line int, translatedSubtitles []srt.Subtitle, contextMessages []providers.ContextMessage) (returnErr error) {
+	var backups []artifactBackup
+	if t.restartPending {
+		var errBackup error
+		backups, errBackup = t.backupRestartArtifacts()
+		if errBackup != nil {
+			return errBackup
+		}
+		defer func() {
+			if returnErr != nil {
+				returnErr = stdErrors.Join(returnErr, restoreArtifactBackups(backups))
+				return
+			}
+			t.restartPending = false
+			returnErr = stdErrors.Join(returnErr, removeArtifactBackups(backups))
+		}()
+	}
+
 	translatedContent := srt.ComposeSRT(translatedSubtitles)
 	if errWriteOutput := writeFileAtomically(t.outputFile, []byte(translatedContent), 0644); errWriteOutput != nil {
 		return fmt.Errorf("failed to write output file %s: %w", t.outputFile, errWriteOutput)
+	}
+	if strings.EqualFold(filepath.Ext(t.config.InputFile), ".mkv") {
+		if errSaveMetadata := t.saveTranslationMetadata(); errSaveMetadata != nil {
+			return errSaveMetadata
+		}
 	}
 	if t.progressFile == "" {
 		return nil
 	}
 
 	progress := ProgressInfo{
-		Line:      line,
-		InputFile: t.config.InputFile,
+		Line:          line,
+		InputFile:     t.config.InputFile,
+		SubtitleTrack: t.config.SubtitleTrack,
 	}
 	if t.usesOpenAIResponses() {
 		fingerprint, errFingerprint := t.translationConfigFingerprint()
@@ -366,6 +574,93 @@ func (t *Translator) saveProgress(line int, translatedSubtitles []srt.Subtitle, 
 	}
 	if errWriteProgress := writeFileAtomically(t.progressFile, data, 0644); errWriteProgress != nil {
 		return fmt.Errorf("failed to write progress file %s: %w", t.progressFile, errWriteProgress)
+	}
+	return nil
+}
+
+func (t *Translator) backupRestartArtifacts() ([]artifactBackup, error) {
+	artifactPaths := []string{t.outputFile, t.progressFile}
+	if strings.EqualFold(filepath.Ext(t.config.InputFile), ".mkv") {
+		artifactPaths = append(artifactPaths, t.metadataFile)
+	}
+
+	var backups []artifactBackup
+	for _, artifactPath := range artifactPaths {
+		fileInfo, errStatArtifact := os.Stat(artifactPath)
+		if os.IsNotExist(errStatArtifact) {
+			backups = append(backups, artifactBackup{path: artifactPath})
+			continue
+		}
+		if errStatArtifact != nil {
+			return nil, stdErrors.Join(errStatArtifact, restoreArtifactBackups(backups))
+		}
+		if !fileInfo.Mode().IsRegular() {
+			return nil, stdErrors.Join(fmt.Errorf("cannot back up non-regular artifact %s", artifactPath), restoreArtifactBackups(backups))
+		}
+
+		backupFile, errCreateBackup := os.CreateTemp(filepath.Dir(artifactPath), "."+filepath.Base(artifactPath)+".backup-*")
+		if errCreateBackup != nil {
+			return nil, stdErrors.Join(errCreateBackup, restoreArtifactBackups(backups))
+		}
+		backupPath := backupFile.Name()
+		if errCloseBackup := backupFile.Close(); errCloseBackup != nil {
+			_ = os.Remove(backupPath)
+			return nil, stdErrors.Join(errCloseBackup, restoreArtifactBackups(backups))
+		}
+		if errRemovePlaceholder := os.Remove(backupPath); errRemovePlaceholder != nil {
+			return nil, stdErrors.Join(errRemovePlaceholder, restoreArtifactBackups(backups))
+		}
+		if errRenameArtifact := os.Rename(artifactPath, backupPath); errRenameArtifact != nil {
+			return nil, stdErrors.Join(errRenameArtifact, restoreArtifactBackups(backups))
+		}
+		backups = append(backups, artifactBackup{path: artifactPath, backupPath: backupPath})
+	}
+	return backups, nil
+}
+
+func restoreArtifactBackups(backups []artifactBackup) error {
+	var restoreErr error
+	for backupIndex := len(backups) - 1; backupIndex >= 0; backupIndex-- {
+		backup := backups[backupIndex]
+		if errRemoveCurrent := os.Remove(backup.path); errRemoveCurrent != nil && !os.IsNotExist(errRemoveCurrent) {
+			restoreErr = stdErrors.Join(restoreErr, fmt.Errorf("failed to remove incomplete artifact %s: %w", backup.path, errRemoveCurrent))
+			continue
+		}
+		if backup.backupPath == "" {
+			continue
+		}
+		if errRestore := os.Rename(backup.backupPath, backup.path); errRestore != nil {
+			restoreErr = stdErrors.Join(restoreErr, fmt.Errorf("failed to restore artifact %s: %w", backup.path, errRestore))
+		}
+	}
+	return restoreErr
+}
+
+func removeArtifactBackups(backups []artifactBackup) error {
+	var removeErr error
+	for _, backup := range backups {
+		if backup.backupPath == "" {
+			continue
+		}
+		if errRemove := os.Remove(backup.backupPath); errRemove != nil && !os.IsNotExist(errRemove) {
+			removeErr = stdErrors.Join(removeErr, fmt.Errorf("failed to remove artifact backup %s: %w", backup.backupPath, errRemove))
+		}
+	}
+	return removeErr
+}
+
+func (t *Translator) saveTranslationMetadata() error {
+	metadata := translationMetadata{
+		InputFile:         t.config.InputFile,
+		SubtitleTrack:     t.config.SubtitleTrack,
+		SourceFingerprint: t.sourceFingerprint,
+	}
+	metadataData, errMarshalMetadata := json.Marshal(metadata)
+	if errMarshalMetadata != nil {
+		return fmt.Errorf("failed to marshal translation metadata: %w", errMarshalMetadata)
+	}
+	if errWriteMetadata := writeFileAtomically(t.metadataFile, metadataData, 0644); errWriteMetadata != nil {
+		return fmt.Errorf("failed to write translation metadata %s: %w", t.metadataFile, errWriteMetadata)
 	}
 	return nil
 }
@@ -483,70 +778,19 @@ func (t *Translator) getTokenLimit(ctx context.Context) error {
 
 // performTranslation performs the main translation process
 func (t *Translator) performTranslation(ctx context.Context) error {
-	// Prepare SRT file (extract from MKV if needed)
-	srtFile, err := t.prepareSRTFile()
-	if err != nil {
-		return err
-	}
-
-	// Read original subtitle file
-	originalData, err := os.ReadFile(srtFile)
-	if err != nil {
-		return errors.NewFileError("failed to read input file", err).WithContext("file_path", srtFile)
-	}
-
-	originalSubtitles, err := srt.ParseSRT(string(originalData))
-	if err != nil {
-		return errors.NewFileError("failed to parse SRT file", err).WithContext("file_path", srtFile)
-	}
-
-	// Load or create translated subtitles
-	var translatedSubtitles []srt.Subtitle
-	if _, err = os.Stat(t.outputFile); err == nil {
-		translatedData, errRead := os.ReadFile(t.outputFile)
-		if errRead == nil {
-			translatedSubtitles, errRead = srt.ParseSRT(string(translatedData))
-			if errRead == nil {
-				logger.Info(fmt.Sprintf("Translated file %s already exists. Loading existing translation...\n", t.outputFile))
-
-				// Prompt for start line if not set
-				if t.config.StartLine == 0 {
-					for {
-						input := logger.InputPrompt(fmt.Sprintf("Enter the line number to start from (1 to %d): ", len(originalSubtitles)))
-						startLine, errParse := strconv.Atoi(strings.TrimSpace(input))
-						if errParse != nil || startLine < 1 || startLine > len(originalSubtitles) {
-							logger.Warning(fmt.Sprintf("Line number must be between 1 and %d. Please try again.", len(originalSubtitles)))
-							continue
-						}
-						t.config.StartLine = startLine
-						break
-					}
-				}
-			}
+	if len(t.originalSubtitles) == 0 {
+		srtFile, errPrepareSRT := t.prepareSRTFile()
+		if errPrepareSRT != nil {
+			return errPrepareSRT
+		}
+		if errLoadSubtitles := t.loadSubtitles(srtFile); errLoadSubtitles != nil {
+			return errLoadSubtitles
 		}
 	}
 
-	if len(translatedSubtitles) == 0 {
-		// Copy original subtitles as template
-		translatedSubtitles = make([]srt.Subtitle, len(originalSubtitles))
-		copy(translatedSubtitles, originalSubtitles)
-		t.config.StartLine = 1
-	}
-
-	// Validate subtitle count consistency
-	if len(originalSubtitles) != len(translatedSubtitles) {
-		return errors.NewValidationError("number of lines of existing translated file does not match the number of lines in the original file", nil).WithContext("original_count", len(originalSubtitles)).WithContext("translated_count", len(translatedSubtitles))
-	}
-
-	// Validate start line
-	if t.config.StartLine > len(originalSubtitles) || t.config.StartLine < 1 {
-		return errors.NewValidationError(fmt.Sprintf("start line must be between 1 and %d", len(originalSubtitles)), nil).WithContext("start_line", t.config.StartLine).WithContext("max_lines", len(originalSubtitles))
-	}
-
-	// Adjust batch size if needed
-	if len(originalSubtitles) < t.config.BatchSize {
-		t.config.BatchSize = len(originalSubtitles)
-	}
+	originalSubtitles := t.originalSubtitles
+	translatedSubtitles := t.translatedSubtitles
+	var err error
 
 	// Setup delay for pro models with free quota (only for Gemini)
 	delay := false
@@ -555,15 +799,17 @@ func (t *Translator) performTranslation(ctx context.Context) error {
 	if t.provider.GetName() == "gemini" && strings.Contains(t.config.ModelName, "pro") && t.config.FreeQuota {
 		delay = true
 		delayTime = 15 * time.Second
-		logger.Info("Pro model and free user quota detected.\n")
 	}
 
-	// Start translation
-	logger.Highlight(fmt.Sprintf("Starting translation of %d lines using %s...\n", len(originalSubtitles)-t.config.StartLine+1, t.provider.GetName()))
+	progressBar := t.progressBar
+	if progressBar == nil {
+		progressBar = logger.NewProgressBar(len(originalSubtitles), "Translating:")
+	} else {
+		progressBar.SetTotal(len(originalSubtitles))
+	}
+	defer progressBar.Stop()
 
-	progressBar := logger.NewProgressBar(len(originalSubtitles), "Translating:")
-	defer progressBar.Stop() // Ensure cleanup in case of early returns
-
+	progressBar.SetStatus("Translating")
 	progressBar.SetSuffix(t.config.ModelName)
 	progressBar.SetSending(true)
 
@@ -614,9 +860,11 @@ func (t *Translator) performTranslation(ctx context.Context) error {
 	batch = append(batch, obj)
 	i++
 
-	// Save initial progress
-	if errSaveProgress := t.saveProgress(i, translatedSubtitles, t.context); errSaveProgress != nil {
-		return errSaveProgress
+	// Preserve previous artifacts until the first translated checkpoint succeeds.
+	if !t.restartPending {
+		if errSaveProgress := t.saveProgress(i, translatedSubtitles, t.context); errSaveProgress != nil {
+			return errSaveProgress
+		}
 	}
 
 	// Main translation loop
@@ -674,23 +922,11 @@ func (t *Translator) performTranslation(ctx context.Context) error {
 	// Stop the progress bar rendering goroutine
 	progressBar.Stop()
 
-	// Save final result
-	logger.Success("Translation completed successfully!")
-	if t.config.ProgressLog {
-		if err = logger.SaveLogsToFile(t.logFilePath); err != nil {
-			logger.Warning(fmt.Sprintf("Failed to save logs: %v", err))
-		}
-	}
-
-	// Cleanup
 	if t.progressFile != "" {
 		if err = os.Remove(t.progressFile); err != nil && !os.IsNotExist(err) {
-			logger.Warning(fmt.Sprintf("Failed to remove progress file: %v", err))
+			t.reportProgressMessage(fmt.Sprintf("Failed to remove progress file: %v", err), logger.Yellow)
 		}
 	}
-
-	// Clean up temporary files (e.g., extracted SRT from MKV)
-	t.cleanup()
 
 	return nil
 }
@@ -709,27 +945,9 @@ func (t *Translator) validateTokenSize(ctx context.Context, batch []srt.Subtitle
 
 	t.tokenCount = tokenCount
 
-	// Check if token count exceeds 90% of limit
+	// Do not prompt while concurrent tasks own the terminal; fail this task with actionable context.
 	if t.tokenLimit != 0 && float64(tokenCount) > float64(t.tokenLimit)*0.9 {
-		// This is a critical error that requires user input, so we break the progress bar display
-		fmt.Printf("\n\n") // Add some spacing
-		logger.Error(fmt.Sprintf("Token size (%d) exceeds limit (%d) for %s", int(float64(tokenCount)/0.9), t.tokenLimit, t.config.ModelName))
-
-		// Ask user for new batch size
-		for {
-			input := logger.InputPrompt(fmt.Sprintf("Please enter a new batch size (current: %d): ", t.config.BatchSize))
-			newBatchSize, errAtoi := strconv.Atoi(strings.TrimSpace(input))
-			if errAtoi != nil || newBatchSize <= 0 {
-				logger.Warning("Invalid input. Batch size must be a positive integer.")
-				continue
-			}
-
-			t.config.BatchSize = newBatchSize
-			logger.Info(fmt.Sprintf("Batch size updated to %d.", t.config.BatchSize))
-			break
-		}
-
-		return errors.NewValidationError("batch size too large, please retry with smaller batch", nil).WithContext("current_batch_size", t.config.BatchSize).WithContext("token_count", tokenCount).WithContext("token_limit", t.tokenLimit)
+		return errors.NewValidationError("batch size too large, please retry with a smaller --batch-size", nil).WithContext("current_batch_size", t.config.BatchSize).WithContext("token_count", tokenCount).WithContext("token_limit", t.tokenLimit)
 	}
 
 	return nil
@@ -977,43 +1195,21 @@ func (t *Translator) isDominantRTL(text string) bool {
 	return rtlCount > ltrCount
 }
 
-// getExtractedSRTPath returns the path where extracted SRT would be saved for an MKV file
-func (t *Translator) getExtractedSRTPath() string {
-	if !strings.HasSuffix(strings.ToLower(t.config.InputFile), ".mkv") {
-		return ""
-	}
-
-	baseName := strings.TrimSuffix(t.config.InputFile, filepath.Ext(t.config.InputFile))
-	return baseName + "_extracted.srt"
-}
-
 // prepareSRTFile prepares the SRT file for translation (extracts from MKV if needed)
 func (t *Translator) prepareSRTFile() (string, error) {
 	inputFile := t.config.InputFile
 
 	// Check if input is an MKV file
 	if strings.HasSuffix(strings.ToLower(inputFile), ".mkv") {
-		extractedPath := t.getExtractedSRTPath()
-
-		// Check if extracted SRT already exists (for resume cases)
-		if _, err := os.Stat(extractedPath); err == nil {
-			logger.Info(fmt.Sprintf("Using existing extracted subtitles: %s", extractedPath))
-			t.extractedSRTFile = extractedPath
-			t.cleanupFiles = append(t.cleanupFiles, extractedPath)
-			return extractedPath, nil
-		}
-
-		logger.Info("MKV file detected. Extracting subtitles...")
-
-		newExtractedPath, err := video.ExtractSubtitlesFromMKV(inputFile)
-		if err != nil {
-			return "", errors.NewFileError("failed to extract subtitles from MKV file", err).WithContext("mkv_path", inputFile)
+		logger.Info(fmt.Sprintf("[%s] Extracting subtitle track %d...", filepath.Base(inputFile), t.config.SubtitleTrack))
+		newExtractedPath, errExtract := video.ExtractSubtitlesFromMKV(inputFile, t.config.SubtitleTrack)
+		if errExtract != nil {
+			return "", errors.NewFileError("failed to extract subtitles from MKV file", errExtract).WithContext("mkv_path", inputFile)
 		}
 
 		t.extractedSRTFile = newExtractedPath
 		t.cleanupFiles = append(t.cleanupFiles, newExtractedPath)
-
-		logger.Success(fmt.Sprintf("Subtitles extracted to: %s", newExtractedPath))
+		logger.Success(fmt.Sprintf("[%s] Subtitles extracted to: %s", filepath.Base(inputFile), newExtractedPath))
 		return newExtractedPath, nil
 	}
 
@@ -1024,8 +1220,8 @@ func (t *Translator) prepareSRTFile() (string, error) {
 // cleanup removes temporary files created during translation
 func (t *Translator) cleanup() {
 	for _, file := range t.cleanupFiles {
-		if err := os.Remove(file); err != nil && !os.IsNotExist(err) {
-			logger.Warning(fmt.Sprintf("Failed to remove temporary file %s: %v", file, err))
+		if errRemove := os.Remove(file); errRemove != nil && !os.IsNotExist(errRemove) {
+			t.reportProgressMessage(fmt.Sprintf("Failed to remove temporary file %s: %v", file, errRemove), logger.Yellow)
 		}
 	}
 }
