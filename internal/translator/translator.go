@@ -932,7 +932,7 @@ func (t *Translator) removeCompletedTaskFiles() {
 			t.reportProgressMessage(fmt.Sprintf("Failed to remove progress file: %v", errRemoveProgress), logger.Yellow)
 		}
 	}
-	if strings.EqualFold(filepath.Ext(t.config.InputFile), ".mkv") && t.metadataFile != "" {
+	if t.metadataFile != "" {
 		if errRemoveMetadata := os.Remove(t.metadataFile); errRemoveMetadata != nil && !os.IsNotExist(errRemoveMetadata) {
 			t.reportProgressMessage(fmt.Sprintf("Failed to remove translation metadata: %v", errRemoveMetadata), logger.Yellow)
 		}

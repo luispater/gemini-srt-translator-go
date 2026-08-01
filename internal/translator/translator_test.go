@@ -590,6 +590,24 @@ func TestTranslatorRemoveCompletedTaskFilesRemovesMKVMetadata(t *testing.T) {
 	}
 }
 
+func TestTranslatorRemoveCompletedTaskFilesRemovesMetadataForNonMKV(t *testing.T) {
+	tempDir := t.TempDir()
+	metadataPath := filepath.Join(tempDir, "output.srt.gst-meta.json")
+	if errWrite := os.WriteFile(metadataPath, []byte("test"), 0644); errWrite != nil {
+		t.Fatalf("Failed to create metadata file: %v", errWrite)
+	}
+
+	translator := &Translator{
+		config:       &config.Config{InputFile: filepath.Join(tempDir, "input.srt")},
+		metadataFile: metadataPath,
+	}
+
+	translator.removeCompletedTaskFiles()
+	if _, errStat := os.Stat(metadataPath); !os.IsNotExist(errStat) {
+		t.Errorf("Completed metadata file still exists: %v", errStat)
+	}
+}
+
 func TestTranslatorCheckSavedProgressRestoresOnlyMatchingResponsesContext(t *testing.T) {
 	tempDir := t.TempDir()
 	inputPath := filepath.Join(tempDir, "input.srt")
