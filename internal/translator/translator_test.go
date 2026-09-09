@@ -1217,7 +1217,7 @@ Dialogue: 0,0:00:11.00,0:00:12.00,Default,,0,0,0,,Inline {\i1}style{\i0} test
 		t.Fatalf("Failed to write test ASS file: %v", errWrite)
 	}
 
-	outputPath := filepath.Join(tempDir, "output.ass")
+	outputPath := filepath.Join(tempDir, "output.srt")
 	cfg := &config.Config{
 		InputFile:      inputPath,
 		OutputFile:     outputPath,
@@ -1306,23 +1306,27 @@ Dialogue: 0,0:00:11.00,0:00:12.00,Default,,0,0,0,,Inline {\i1}style{\i0} test
 	}
 
 	savedStr := string(savedBytes)
-	if !strings.Contains(savedStr, "[Script Info]") {
-		t.Errorf("saved ASS missing [Script Info]")
+	if strings.Contains(savedStr, "[Script Info]") || strings.Contains(savedStr, "Dialogue:") {
+		t.Errorf("saved file should be SRT, but contains ASS headers/events:\n%s", savedStr)
 	}
-	if !strings.Contains(savedStr, "Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,{\\i1}你好世界{\\i0}") {
-		t.Errorf("saved ASS missing reattached italic tags:\n%s", savedStr)
+
+	parsedSRT, errParseSRT := srt.ParseSRT(savedStr)
+	if errParseSRT != nil {
+		t.Fatalf("failed to parse saved SRT file: %v", errParseSRT)
 	}
-	if !strings.Contains(savedStr, "Dialogue: 0,0:00:04.00,0:00:06.00,Default,,0,0,0,,{\\pos(100,200)}第二行") {
-		t.Errorf("saved ASS missing reattached pos tags:\n%s", savedStr)
+
+	if len(parsedSRT) != 3 {
+		t.Fatalf("expected 3 SRT entries (excluding non-translatable drawing and pure tags), got %d", len(parsedSRT))
 	}
-	if !strings.Contains(savedStr, "Dialogue: 0,0:00:07.00,0:00:08.00,Default,,0,0,0,,{\\pos(300,400)}") {
-		t.Errorf("saved ASS modified or duplicated pure tag line:\n%s", savedStr)
+
+	if parsedSRT[0].Index != 1 || parsedSRT[0].Content != "你好世界" {
+		t.Errorf("unexpected SRT entry 1: %+v", parsedSRT[0])
 	}
-	if !strings.Contains(savedStr, "Dialogue: 0,0:00:09.00,0:00:10.00,Default,,0,0,0,,{\\p1}m 0 0 l 100 100{\\p0}") {
-		t.Errorf("saved ASS modified drawing line:\n%s", savedStr)
+	if parsedSRT[1].Index != 2 || parsedSRT[1].Content != "第二行" {
+		t.Errorf("unexpected SRT entry 2: %+v", parsedSRT[1])
 	}
-	if !strings.Contains(savedStr, "Dialogue: 0,0:00:11.00,0:00:12.00,Default,,0,0,0,,行内 {\\i1}样式{\\i0} 测试") {
-		t.Errorf("saved ASS missing restored inline style tag:\n%s", savedStr)
+	if parsedSRT[2].Index != 3 || parsedSRT[2].Content != "行内 样式 测试" {
+		t.Errorf("unexpected SRT entry 3: %+v", parsedSRT[2])
 	}
 }
 
@@ -1332,8 +1336,18 @@ func TestTranslator_NewTranslator_ASSOutputFile(t *testing.T) {
 		TargetLanguage: "Simplified Chinese",
 	}
 	trAss := NewTranslator(cfgAss)
-	if !strings.HasSuffix(trAss.outputFile, ".chs.ass") {
-		t.Errorf("expected .chs.ass suffix, got %s", trAss.outputFile)
+	if !strings.HasSuffix(trAss.outputFile, ".chs.srt") {
+		t.Errorf("expected .chs.srt suffix, got %s", trAss.outputFile)
+	}
+
+	cfgExplicitAss := &config.Config{
+		InputFile:      "movie.ass",
+		OutputFile:     "custom.ass",
+		TargetLanguage: "Simplified Chinese",
+	}
+	trExplicitAss := NewTranslator(cfgExplicitAss)
+	if !strings.HasSuffix(trExplicitAss.outputFile, ".srt") {
+		t.Errorf("expected custom.srt suffix when explicit ASS output is requested, got %s", trExplicitAss.outputFile)
 	}
 
 	cfgSrt := &config.Config{
@@ -1353,8 +1367,8 @@ func TestTranslator_NewTranslator_ASSOutputFile(t *testing.T) {
 			TargetLanguage: "Simplified Chinese",
 		}
 		trMkv := NewTranslator(cfgMkv)
-		if !strings.HasSuffix(trMkv.outputFile, ".chs.ass") {
-			t.Errorf("expected MKV with ASS to default to .chs.ass, got %s", trMkv.outputFile)
+		if !strings.HasSuffix(trMkv.outputFile, ".chs.srt") {
+			t.Errorf("expected MKV with ASS to default to .chs.srt, got %s", trMkv.outputFile)
 		}
 	}
 }
@@ -1379,9 +1393,9 @@ Dialogue: 0,0:00:04.00,0:00:06.00,Default,,0,0,0,,Second line
 		t.Fatalf("Failed to write input ASS file: %v", errWrite)
 	}
 
-	outputPath := filepath.Join(tempDir, "output.ass")
+	outputPath := filepath.Join(tempDir, "output.srt")
 
-	// Phase 1: Translate line 1 with reordered tags (red before blue)
+	// Phase 1: Translate line 1
 	cfg1 := &config.Config{
 		InputFile:      inputPath,
 		OutputFile:     outputPath,
@@ -1405,13 +1419,17 @@ Dialogue: 0,0:00:04.00,0:00:06.00,Default,,0,0,0,,Second line
 		t.Fatalf("tr1.saveProgress failed: %v", errSave1)
 	}
 
-	// Verify line 1 was saved properly
+	// Verify line 1 was saved properly as SRT
 	data1, errRead1 := os.ReadFile(outputPath)
 	if errRead1 != nil {
 		t.Fatalf("failed to read phase 1 output: %v", errRead1)
 	}
-	if !strings.Contains(string(data1), "Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,{\\i1}你好世界{\\i0}") {
-		t.Fatalf("phase 1 output missing translated line 1 tags:\n%s", string(data1))
+	parsed1, errParse1 := srt.ParseSRT(string(data1))
+	if errParse1 != nil {
+		t.Fatalf("phase 1 output is not valid SRT: %v", errParse1)
+	}
+	if len(parsed1) < 1 || parsed1[0].Content != "你好世界" {
+		t.Fatalf("phase 1 output missing translated line 1: %v", parsed1)
 	}
 
 	// Phase 2: Resume translation from line 2
@@ -1439,17 +1457,23 @@ Dialogue: 0,0:00:04.00,0:00:06.00,Default,,0,0,0,,Second line
 		t.Fatalf("tr2.saveProgress failed: %v", errSave2)
 	}
 
-	// Phase 3: Verify line 1 still has its tags and line 2 is translated
+	// Phase 3: Verify line 1 still has translated content and line 2 is translated in SRT
 	data2, errRead2 := os.ReadFile(outputPath)
 	if errRead2 != nil {
 		t.Fatalf("failed to read phase 2 output: %v", errRead2)
 	}
-	str2 := string(data2)
-	if !strings.Contains(str2, "Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,{\\i1}你好世界{\\i0}") {
-		t.Errorf("resumed output LOST tags on line 1:\n%s", str2)
+	parsed2, errParse2 := srt.ParseSRT(string(data2))
+	if errParse2 != nil {
+		t.Fatalf("phase 2 output is not valid SRT: %v", errParse2)
 	}
-	if !strings.Contains(str2, "Dialogue: 0,0:00:04.00,0:00:06.00,Default,,0,0,0,,第二行") {
-		t.Errorf("resumed output missing translated line 2:\n%s", str2)
+	if len(parsed2) != 2 {
+		t.Fatalf("expected 2 SRT entries, got %d", len(parsed2))
+	}
+	if parsed2[0].Content != "你好世界" {
+		t.Errorf("resumed output lost line 1 translation: got %q", parsed2[0].Content)
+	}
+	if parsed2[1].Content != "第二行" {
+		t.Errorf("resumed output missing line 2 translation: got %q", parsed2[1].Content)
 	}
 }
 
@@ -1565,7 +1589,7 @@ Dialogue: 0,0:00:04.00,0:00:06.00,Default,,0,0,0,,{\b1}bold{\b0} and {\i1}italic
 		t.Fatalf("Failed to write input ASS file: %v", errWrite)
 	}
 
-	outputPath := filepath.Join(tempDir, "output.ass")
+	outputPath := filepath.Join(tempDir, "output.srt")
 
 	// Phase 1: Translate line 1 (red before blue) and line 2 (italic before bold)
 	cfg1 := &config.Config{
@@ -1594,15 +1618,22 @@ Dialogue: 0,0:00:04.00,0:00:06.00,Default,,0,0,0,,{\b1}bold{\b0} and {\i1}italic
 		t.Fatalf("tr1.saveProgress failed: %v", errSave1)
 	}
 
-	// Verify line 1 and line 2 were saved properly in output.ass
+	// Verify line 1 and line 2 were saved properly in output.srt
 	data1, errRead1 := os.ReadFile(outputPath)
 	if errRead1 != nil {
 		t.Fatalf("failed to read output file: %v", errRead1)
 	}
-	expectedLine1 := "Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,{\\c&HFF0000&}红色{\\c} 和 {\\c&H0000FF&}蓝色{\\c}"
-	expectedLine2 := "Dialogue: 0,0:00:04.00,0:00:06.00,Default,,0,0,0,,{\\i1}斜体{\\i0} 和 {\\b1}粗体{\\b0}"
-	if !strings.Contains(string(data1), expectedLine1) || !strings.Contains(string(data1), expectedLine2) {
-		t.Fatalf("phase 1 output does not match expected swapped tags:\n%s", string(data1))
+	parsed1, errParse1 := srt.ParseSRT(string(data1))
+	if errParse1 != nil {
+		t.Fatalf("phase 1 output is not valid SRT: %v", errParse1)
+	}
+	if len(parsed1) != 2 {
+		t.Fatalf("expected 2 SRT entries, got %d", len(parsed1))
+	}
+	expectedLine1 := "红色 和 蓝色"
+	expectedLine2 := "斜体 和 粗体"
+	if parsed1[0].Content != expectedLine1 || parsed1[1].Content != expectedLine2 {
+		t.Fatalf("phase 1 output does not match expected translated content:\nGot: %q and %q\nWant: %q and %q", parsed1[0].Content, parsed1[1].Content, expectedLine1, expectedLine2)
 	}
 
 	// Phase 2: Resume from line 2
@@ -1618,7 +1649,7 @@ Dialogue: 0,0:00:04.00,0:00:06.00,Default,,0,0,0,,{\b1}bold{\b0} and {\i1}italic
 		t.Fatalf("tr2.loadSubtitles failed: %v", errLoad2)
 	}
 
-	// Initial checkpoint before translation starts MUST NOT corrupt line 2's tags!
+	// Initial checkpoint before translation starts MUST NOT corrupt line 2
 	if errInitCheck := tr2.saveProgress(1, tr2.translatedSubtitles, nil); errInitCheck != nil {
 		t.Fatalf("tr2 initial checkpoint failed: %v", errInitCheck)
 	}
@@ -1626,8 +1657,12 @@ Dialogue: 0,0:00:04.00,0:00:06.00,Default,,0,0,0,,{\b1}bold{\b0} and {\i1}italic
 	if errReadInit != nil {
 		t.Fatalf("failed to read initial checkpoint output: %v", errReadInit)
 	}
-	if !strings.Contains(string(dataInit), expectedLine2) {
-		t.Fatalf("initial checkpoint corrupted line 2 tags before translation:\n%s", string(dataInit))
+	parsedInit, errParseInit := srt.ParseSRT(string(dataInit))
+	if errParseInit != nil {
+		t.Fatalf("initial checkpoint output is not valid SRT: %v", errParseInit)
+	}
+	if parsedInit[1].Content != expectedLine2 {
+		t.Fatalf("initial checkpoint corrupted line 2 before translation:\n%s", string(dataInit))
 	}
 
 	// Translate line 2 with new translation
@@ -1643,17 +1678,20 @@ Dialogue: 0,0:00:04.00,0:00:06.00,Default,,0,0,0,,{\b1}bold{\b0} and {\i1}italic
 		t.Fatalf("tr2.saveProgress failed: %v", errSave2)
 	}
 
-	// Phase 3: Verify line 1 STILL has red before blue and line 2 was updated
+	// Phase 3: Verify line 1 STILL has translated content and line 2 was updated
 	data2, errRead2 := os.ReadFile(outputPath)
 	if errRead2 != nil {
 		t.Fatalf("failed to read phase 2 output: %v", errRead2)
 	}
-	str2 := string(data2)
-	if !strings.Contains(str2, expectedLine1) {
-		t.Errorf("resumed output SWAPPED TAGS BACK on line 1:\nGot:\n%s\nWant line 1:\n%s", str2, expectedLine1)
+	parsed2, errParse2 := srt.ParseSRT(string(data2))
+	if errParse2 != nil {
+		t.Fatalf("phase 2 output is not valid SRT: %v", errParse2)
 	}
-	if !strings.Contains(str2, "Dialogue: 0,0:00:04.00,0:00:06.00,Default,,0,0,0,,全新第二行") {
-		t.Errorf("resumed output missing translated line 2:\n%s", str2)
+	if parsed2[0].Content != expectedLine1 {
+		t.Errorf("resumed output modified line 1:\nGot: %q\nWant: %q", parsed2[0].Content, expectedLine1)
+	}
+	if parsed2[1].Content != "全新第二行" {
+		t.Errorf("resumed output missing translated line 2: got %q", parsed2[1].Content)
 	}
 
 	// Phase 4: Initial checkpoint preservation when starting from line 1 with existing output file
@@ -1676,9 +1714,12 @@ Dialogue: 0,0:00:04.00,0:00:06.00,Default,,0,0,0,,{\b1}bold{\b0} and {\i1}italic
 	if errRead3 != nil {
 		t.Fatalf("failed to read phase 3 output: %v", errRead3)
 	}
-	str3 := string(data3)
-	if !strings.Contains(str3, expectedLine1) {
-		t.Errorf("initial checkpoint REVERTED swapped tags on line 1:\n%s", str3)
+	parsed3, errParse3 := srt.ParseSRT(string(data3))
+	if errParse3 != nil {
+		t.Fatalf("phase 3 output is not valid SRT: %v", errParse3)
+	}
+	if parsed3[0].Content != expectedLine1 {
+		t.Errorf("initial checkpoint reverted line 1: got %q, want %q", parsed3[0].Content, expectedLine1)
 	}
 }
 
@@ -1716,7 +1757,7 @@ Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,Top\NBottom\hWord
 		t.Fatalf("Failed to write input ASS file: %v", errWrite)
 	}
 
-	outputPath := filepath.Join(tempDir, "output.ass")
+	outputPath := filepath.Join(tempDir, "output.srt")
 	cfg := &config.Config{
 		InputFile:      inputPath,
 		OutputFile:     outputPath,
@@ -1739,11 +1780,18 @@ Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,Top\NBottom\hWord
 	if errRead != nil {
 		t.Fatalf("failed to read output file: %v", errRead)
 	}
-	outputStr := string(data)
+	parsedInit, errParseInit := srt.ParseSRT(string(data))
+	if errParseInit != nil {
+		t.Fatalf("initial output is not valid SRT: %v", errParseInit)
+	}
+	if len(parsedInit) != 1 {
+		t.Fatalf("expected 1 SRT entry, got %d", len(parsedInit))
+	}
 
-	// Untranslated line must retain \N and \h, NOT be replaced with 4 spaces
-	if !strings.Contains(outputStr, `Top\NBottom\hWord`) {
-		t.Errorf("initial checkpoint mutated untranslated layout: got\n%s", outputStr)
+	// Untranslated line in SRT must retain newline and space (\N -> \n, \h -> space)
+	expectedUntrans := "Top\nBottom Word"
+	if parsedInit[0].Content != expectedUntrans {
+		t.Errorf("initial checkpoint mutated untranslated layout: got %q, want %q", parsedInit[0].Content, expectedUntrans)
 	}
 
 	// Now simulate model translating this line:
@@ -1759,9 +1807,13 @@ Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,Top\NBottom\hWord
 	if errReadTrans != nil {
 		t.Fatalf("failed to read output file after translation: %v", errReadTrans)
 	}
-	outputTransStr := string(dataTrans)
-	if !strings.Contains(outputTransStr, `顶部\N底部\h词`) {
-		t.Errorf("translated line lost layout escapes, got:\n%s", outputTransStr)
+	parsedTrans, errParseTrans := srt.ParseSRT(string(dataTrans))
+	if errParseTrans != nil {
+		t.Fatalf("translated output is not valid SRT: %v", errParseTrans)
+	}
+	expectedTrans := "顶部\n底部 词"
+	if parsedTrans[0].Content != expectedTrans {
+		t.Errorf("translated line lost layout escapes, got %q, want %q", parsedTrans[0].Content, expectedTrans)
 	}
 }
 
@@ -1785,5 +1837,284 @@ func TestProcessTranslatedLines_RTLWithASSTags(t *testing.T) {
 	expected := "\u202b[[ASSTAG0]]مرحبا[[ASSTAG1]]\u202c"
 	if transSubs[0].Content != expected {
 		t.Errorf("RTL formatting failed: got %q, want %q", transSubs[0].Content, expected)
+	}
+}
+
+type assTestMockProvider struct {
+	translateBatchFunc func(ctx context.Context, batch []srt.SubtitleObject) (*providers.TranslationResponse, error)
+}
+
+func (m *assTestMockProvider) GetModels(ctx context.Context) ([]string, error) {
+	return []string{"test-model"}, nil
+}
+
+func (m *assTestMockProvider) GetTokenLimit(ctx context.Context, modelName string) (int32, error) {
+	return 1000, nil
+}
+
+func (m *assTestMockProvider) CountTokens(ctx context.Context, modelName string, content string) (int32, error) {
+	return 10, nil
+}
+
+func (m *assTestMockProvider) TranslateBatch(ctx context.Context, batch []srt.SubtitleObject, previousContext []providers.ContextMessage, config *providers.TranslationConfig) (*providers.TranslationResponse, error) {
+	if m.translateBatchFunc != nil {
+		return m.translateBatchFunc(ctx, batch)
+	}
+	return &providers.TranslationResponse{TranslatedBatch: batch}, nil
+}
+
+func (m *assTestMockProvider) GetName() string {
+	return "mock"
+}
+
+func TestTranslator_ASSInputGeneratesSRTOutputOnly(t *testing.T) {
+	tempDir := t.TempDir()
+
+	assContent := `[Script Info]
+Title: ASS to SRT Test
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize
+Style: Default,Arial,20
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,{\i1}Hello{\i0} world
+Dialogue: 0,0:00:04.00,0:00:06.00,Default,,0,0,0,,{\pos(100,200)}
+Dialogue: 0,0:00:07.00,0:00:09.00,Default,,0,0,0,,Line 1\NLine 2
+`
+	inputPath := filepath.Join(tempDir, "movie.ass")
+	if errWrite := os.WriteFile(inputPath, []byte(assContent), 0644); errWrite != nil {
+		t.Fatalf("Failed to write input ASS file: %v", errWrite)
+	}
+
+	cfg := config.NewConfig()
+	cfg.InputFile = inputPath
+	cfg.TargetLanguage = "Simplified Chinese"
+	cfg.BatchSize = 10
+	cfg.ModelName = "test-model"
+
+	tr := NewTranslator(cfg)
+	tr.provider = &assTestMockProvider{
+		translateBatchFunc: func(ctx context.Context, batch []srt.SubtitleObject) (*providers.TranslationResponse, error) {
+			translated := make([]srt.SubtitleObject, len(batch))
+			for i, item := range batch {
+				translated[i] = srt.SubtitleObject{
+					Index: item.Index,
+					Guard: item.Guard,
+				}
+				if strings.Contains(item.Content, "Hello") {
+					translated[i].Content = "[[ASSTAG0]]你好[[ASSTAG1]] 世界"
+				} else if strings.Contains(item.Content, "Line 1") {
+					translated[i].Content = "第一行[[ASSTAG0]]第二行"
+				} else {
+					translated[i].Content = item.Content
+				}
+			}
+			return &providers.TranslationResponse{
+				TranslatedBatch: translated,
+			}, nil
+		},
+	}
+
+	if errTranslate := tr.Translate(context.Background()); errTranslate != nil {
+		t.Fatalf("Translate() failed: %v", errTranslate)
+	}
+
+	// Verify default output file is .srt
+	expectedSRTPath := filepath.Join(tempDir, "movie.chs.srt")
+	if _, errStat := os.Stat(expectedSRTPath); os.IsNotExist(errStat) {
+		t.Errorf("expected SRT output file %s does not exist", expectedSRTPath)
+	}
+
+	// Verify no .ass output file was created
+	assOutputPath := filepath.Join(tempDir, "movie.chs.ass")
+	if _, errStatAss := os.Stat(assOutputPath); errStatAss == nil {
+		t.Errorf("unexpected ASS output file %s exists", assOutputPath)
+	}
+
+	// Verify output content is valid SRT
+	content, errRead := os.ReadFile(expectedSRTPath)
+	if errRead != nil {
+		t.Fatalf("failed to read SRT output: %v", errRead)
+	}
+	srtContent := string(content)
+	if strings.Contains(srtContent, "[Script Info]") || strings.Contains(srtContent, "Dialogue:") {
+		t.Errorf("output file contains ASS structure:\n%s", srtContent)
+	}
+
+	parsed, errParse := srt.ParseSRT(srtContent)
+	if errParse != nil {
+		t.Fatalf("output file is not valid SRT: %v", errParse)
+	}
+
+	if len(parsed) != 2 {
+		t.Fatalf("expected 2 subtitles in SRT output, got %d", len(parsed))
+	}
+	if parsed[0].Index != 1 || parsed[0].Content != "你好 世界" {
+		t.Errorf("unexpected entry 1: %+v", parsed[0])
+	}
+	if parsed[1].Index != 2 || parsed[1].Content != "第一行\n第二行" {
+		t.Errorf("unexpected entry 2: %+v", parsed[1])
+	}
+}
+
+func TestTranslator_ASSResume_MismatchedSRTCountRestarts(t *testing.T) {
+	tempDir := t.TempDir()
+
+	assContent := `[Script Info]
+Title: Mismatched SRT Test
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize
+Style: Default,Arial,20
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,Hello
+Dialogue: 0,0:00:04.00,0:00:06.00,Default,,0,0,0,,World
+`
+	inputPath := filepath.Join(tempDir, "input.ass")
+	if errWrite := os.WriteFile(inputPath, []byte(assContent), 0644); errWrite != nil {
+		t.Fatalf("Failed to write input ASS file: %v", errWrite)
+	}
+
+	// Create an existing output SRT with only 1 entry (mismatch: input has 2 translatable lines)
+	outputPath := filepath.Join(tempDir, "output.srt")
+	incompleteSRT := "1\n00:00:01,000 --> 00:00:03,000\n你好\n\n"
+	if errWriteSRT := os.WriteFile(outputPath, []byte(incompleteSRT), 0644); errWriteSRT != nil {
+		t.Fatalf("Failed to write incomplete SRT file: %v", errWriteSRT)
+	}
+
+	cfg := config.NewConfig()
+	cfg.InputFile = inputPath
+	cfg.OutputFile = outputPath
+	cfg.TargetLanguage = "Simplified Chinese"
+	cfg.StartLine = 2
+
+	tr := NewTranslator(cfg)
+	if errLoad := tr.loadSubtitles(inputPath); errLoad != nil {
+		t.Fatalf("loadSubtitles failed: %v", errLoad)
+	}
+
+	// Mismatched count should cause restartPending to be true and startLine reset to 1
+	if !tr.restartPending {
+		t.Errorf("expected restartPending to be true due to mismatched SRT count")
+	}
+	if tr.config.StartLine != 1 {
+		t.Errorf("expected startLine to be reset to 1, got %d", tr.config.StartLine)
+	}
+}
+
+func TestTranslator_ASSResumePreservesLiteralTagPlaceholders(t *testing.T) {
+	tempDir := t.TempDir()
+
+	assContent := `[Script Info]
+Title: Literal Tag Placeholder Resume Test
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize
+Style: Default,Arial,20
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,{\i1}Hello{\i0}
+Dialogue: 0,0:00:04.00,0:00:06.00,Default,,0,0,0,,Second line
+`
+	inputPath := filepath.Join(tempDir, "input.ass")
+	if errWrite := os.WriteFile(inputPath, []byte(assContent), 0644); errWrite != nil {
+		t.Fatalf("Failed to write input ASS file: %v", errWrite)
+	}
+
+	outputPath := filepath.Join(tempDir, "output.srt")
+
+	// Phase 1: Translate line 1 where translation contains literal text "[[ASSTAG0]]"
+	cfg1 := config.NewConfig()
+	cfg1.InputFile = inputPath
+	cfg1.OutputFile = outputPath
+	cfg1.TargetLanguage = "Simplified Chinese"
+	cfg1.BatchSize = 10
+	cfg1.StartLine = 1
+
+	tr1 := NewTranslator(cfg1)
+	if errLoad1 := tr1.loadSubtitles(inputPath); errLoad1 != nil {
+		t.Fatalf("tr1.loadSubtitles failed: %v", errLoad1)
+	}
+
+	literalText := "Code: [[ASSTAG0]] preserved"
+	trans1 := []srt.Subtitle{
+		{Index: 1, Start: 1 * time.Second, End: 3 * time.Second, Content: literalText},
+		{Index: 2, Start: 4 * time.Second, End: 6 * time.Second, Content: "Second line"},
+	}
+	// Note: in Phase 1, line 1 is set directly or translated
+	tr1.assDialogues[0].SetPlainText(literalText)
+	if errSave1 := tr1.saveProgress(1, trans1, nil); errSave1 != nil {
+		t.Fatalf("tr1.saveProgress failed: %v", errSave1)
+	}
+
+	// Verify Phase 1 output in SRT contains literalText
+	data1, errRead1 := os.ReadFile(outputPath)
+	if errRead1 != nil {
+		t.Fatalf("failed to read phase 1 output: %v", errRead1)
+	}
+	parsed1, errParse1 := srt.ParseSRT(string(data1))
+	if errParse1 != nil {
+		t.Fatalf("failed to parse phase 1 SRT: %v", errParse1)
+	}
+	if parsed1[0].Content != literalText {
+		t.Fatalf("phase 1 output does not contain expected literal text: got %q, want %q", parsed1[0].Content, literalText)
+	}
+
+	// Phase 2: Resume translation from line 2
+	cfg2 := config.NewConfig()
+	cfg2.InputFile = inputPath
+	cfg2.OutputFile = outputPath
+	cfg2.TargetLanguage = "Simplified Chinese"
+	cfg2.BatchSize = 10
+	cfg2.StartLine = 2
+
+	tr2 := NewTranslator(cfg2)
+	if errLoad2 := tr2.loadSubtitles(inputPath); errLoad2 != nil {
+		t.Fatalf("tr2.loadSubtitles failed: %v", errLoad2)
+	}
+
+	// Initial checkpoint before translation starts
+	if errInitCheck := tr2.saveProgress(1, tr2.translatedSubtitles, nil); errInitCheck != nil {
+		t.Fatalf("tr2 initial checkpoint failed: %v", errInitCheck)
+	}
+
+	// Translate line 2
+	trans2 := []srt.Subtitle{
+		{Index: 1, Start: 1 * time.Second, End: 3 * time.Second, Content: tr2.translatedSubtitles[0].Content},
+		{Index: 2, Start: 4 * time.Second, End: 6 * time.Second, Content: "第二行"},
+	}
+	batch2 := []srt.SubtitleObject{{Index: 1, Content: "第二行"}}
+	if errProcess2 := tr2.processTranslatedLines(batch2, trans2, batch2); errProcess2 != nil {
+		t.Fatalf("tr2.processTranslatedLines failed: %v", errProcess2)
+	}
+	if errSave2 := tr2.saveProgress(2, trans2, nil); errSave2 != nil {
+		t.Fatalf("tr2.saveProgress failed: %v", errSave2)
+	}
+
+	// Phase 3: Verify line 1 still has literalText intact, not corrupted or stripped
+	data2, errRead2 := os.ReadFile(outputPath)
+	if errRead2 != nil {
+		t.Fatalf("failed to read phase 2 output: %v", errRead2)
+	}
+	parsed2, errParse2 := srt.ParseSRT(string(data2))
+	if errParse2 != nil {
+		t.Fatalf("failed to parse phase 2 SRT: %v", errParse2)
+	}
+	if len(parsed2) != 2 {
+		t.Fatalf("expected 2 SRT entries, got %d", len(parsed2))
+	}
+	if parsed2[0].Content != literalText {
+		t.Errorf("resumed output corrupted literal text on line 1: got %q, want %q", parsed2[0].Content, literalText)
+	}
+	if parsed2[1].Content != "第二行" {
+		t.Errorf("resumed output missing line 2 translation: got %q", parsed2[1].Content)
 	}
 }

@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/luispater/gemini-srt-translator-go/pkg/srt"
 )
 
 func TestParseAndComposeASS(t *testing.T) {
@@ -1422,5 +1424,74 @@ func TestFile_GetWrapStyle(t *testing.T) {
 		if got := file.GetWrapStyle(); got != tc.expected {
 			t.Errorf("GetWrapStyle(%q) = %d, want %d", tc.content, got, tc.expected)
 		}
+	}
+}
+
+func TestFile_ToSRT(t *testing.T) {
+	assContent := `[Script Info]
+Title: ToSRT Test
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize
+Style: Default,Arial,20
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,{\i1}Hello{\i0} world
+Dialogue: 0,0:00:04.00,0:00:06.00,Default,,0,0,0,,{\pos(100,200)}
+Dialogue: 0,0:00:07.00,0:00:09.00,Default,,0,0,0,,{\p1}m 0 0 l 10 10{\p0}
+Dialogue: 0,0:00:10.00,0:00:12.50,Default,,0,0,0,,Line 1\NLine 2
+`
+	file, errParse := ParseASS(assContent)
+	if errParse != nil {
+		t.Fatalf("ParseASS failed: %v", errParse)
+	}
+
+	srtStr := file.ToSRT()
+	expected := "1\n00:00:01,000 --> 00:00:03,000\nHello world\n\n2\n00:00:10,000 --> 00:00:12,500\nLine 1\nLine 2\n"
+	if srtStr != expected {
+		t.Errorf("ToSRT mismatch.\nGot:\n%s\nWant:\n%s", srtStr, expected)
+	}
+}
+
+func TestFile_ToSRT_ConsecutiveNewlines(t *testing.T) {
+	assContent := `[Script Info]
+Title: Consecutive Newlines Test
+WrapStyle: 0
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize
+Style: Default,Arial,20
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:03.00,Default,,0,0,0,,Line 1\N\NLine 2
+Dialogue: 0,0:00:04.00,0:00:06.00,Default,,0,0,0,,Line A\N   \NLine B
+`
+	file, errParse := ParseASS(assContent)
+	if errParse != nil {
+		t.Fatalf("ParseASS failed: %v", errParse)
+	}
+
+	srtStr := file.ToSRT()
+	expected := "1\n00:00:01,000 --> 00:00:03,000\nLine 1\nLine 2\n\n2\n00:00:04,000 --> 00:00:06,000\nLine A\nLine B\n"
+	if srtStr != expected {
+		t.Errorf("ToSRT with consecutive newlines mismatch.\nGot:\n%s\nWant:\n%s", srtStr, expected)
+	}
+
+	// Verify the generated SRT string can be successfully roundtrip parsed
+	parsed, errParseSRT := srt.ParseSRT(srtStr)
+	if errParseSRT != nil {
+		t.Fatalf("failed to parse generated SRT: %v", errParseSRT)
+	}
+	if len(parsed) != 2 {
+		t.Fatalf("expected 2 parsed SRT entries, got %d", len(parsed))
+	}
+	if parsed[0].Content != "Line 1\nLine 2" {
+		t.Errorf("unexpected entry 0 content: %q", parsed[0].Content)
+	}
+	if parsed[1].Content != "Line A\nLine B" {
+		t.Errorf("unexpected entry 1 content: %q", parsed[1].Content)
 	}
 }

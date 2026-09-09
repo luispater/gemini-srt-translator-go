@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/luispater/gemini-srt-translator-go/pkg/srt"
 )
 
 const escapedTagPrefix = "[[\x00ASSTAG"
@@ -360,6 +362,7 @@ type Dialogue struct {
 	Tags           []string      // Override tags extracted from text
 	IsTranslatable bool          // True if the line contains translatable text
 	Fields         []string      // Original raw fields to preserve custom format fields
+	PlainText      *string       // Directly set plain text from external SRT or loaded translation
 }
 
 // SetTranslatedText updates the dialogue's text with translated content, restoring tags
@@ -367,10 +370,21 @@ func (d *Dialogue) SetTranslatedText(translated string) {
 	if !d.IsTranslatable {
 		return
 	}
+	d.PlainText = nil
 	d.CleanText = translated
 	// Escape only bare (unescaped) curly braces so they are rendered as literal text in ASS
 	escaped := escapeBareBraces(translated)
 	d.Text = restoreTags(escaped, d.Tags)
+}
+
+// SetPlainText directly sets the plain text for this dialogue, bypassing ASS tag restoration.
+// Used when loading existing translations from plain SRT files.
+func (d *Dialogue) SetPlainText(plain string) {
+	if !d.IsTranslatable {
+		return
+	}
+	d.PlainText = &plain
+	d.CleanText = plain
 }
 
 func escapeBareBraces(s string) string {
@@ -1112,4 +1126,96 @@ func SplitASSTags(text string) (prefix string, clean string, suffix string) {
 
 	clean = s
 	return prefix, clean, suffix
+}
+
+// NormalizeSRTContent ensures that a subtitle entry does not contain blank lines
+// that would prematurely terminate an SRT subtitle block.
+func NormalizeSRTContent(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	lines := strings.Split(s, "\n")
+	var cleanLines []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			cleanLines = append(cleanLines, trimmed)
+		}
+	}
+	return strings.Join(cleanLines, "\n")
+}
+
+// ToSRTSubtitles converts translatable dialogue events in an ASS file into SRT Subtitle structures
+func (f *File) ToSRTSubtitles() []srt.Subtitle {
+	if f == nil {
+		return nil
+	}
+	wrapStyle := f.GetWrapStyle()
+	dialogues := f.GetDialogues()
+	var subtitles []srt.Subtitle
+	srtIndex := 1
+	for _, dlg := range dialogues {
+		if !dlg.IsTranslatable {
+			continue
+		}
+		if dlg.PlainText != nil {
+			normalized := NormalizeSRTContent(*dlg.PlainText)
+			if normalized == "" {
+				continue
+			}
+			subtitles = append(subtitles, srt.Subtitle{
+				Index:   srtIndex,
+				Start:   dlg.Start,
+				End:     dlg.End,
+				Content: normalized,
+			})
+			srtIndex++
+			continue
+		}
+		cleanText, isTranslatable := StripASSTagsToPlainText(dlg.Text, wrapStyle)
+		if !isTranslatable {
+			continue
+		}
+		normalized := NormalizeSRTContent(cleanText)
+		if normalized == "" {
+			continue
+		}
+		subtitles = append(subtitles, srt.Subtitle{
+			Index:   srtIndex,
+			Start:   dlg.Start,
+			End:     dlg.End,
+			Content: normalized,
+		})
+		srtIndex++
+	}
+	return subtitles
+}
+
+// CountTranslatableSubtitles returns the count of dialogues that produce valid SRT subtitles
+func (f *File) CountTranslatableSubtitles() int {
+	if f == nil {
+		return 0
+	}
+	wrapStyle := f.GetWrapStyle()
+	count := 0
+	for _, dlg := range f.GetDialogues() {
+		if !dlg.IsTranslatable {
+			continue
+		}
+		if dlg.PlainText != nil {
+			if NormalizeSRTContent(*dlg.PlainText) != "" {
+				count++
+			}
+			continue
+		}
+		cleanText, isTranslatable := StripASSTagsToPlainText(dlg.Text, wrapStyle)
+		if isTranslatable && NormalizeSRTContent(cleanText) != "" {
+			count++
+		}
+	}
+	return count
+}
+
+// ToSRT converts translatable dialogue events in an ASS file to standard SRT formatted string
+func (f *File) ToSRT() string {
+	return srt.ComposeSRT(f.ToSRTSubtitles())
 }
