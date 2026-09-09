@@ -31,10 +31,10 @@ func newRootCommand() *cobra.Command {
 
 func newRootCommandWithConfig(commandConfig *config.Config) *cobra.Command {
 	rootCmd := &cobra.Command{
-		Use:   "gst [flags] <SRT_FILE|MKV_FILE|GLOB>...",
-		Short: "Translate one or more SRT files or extract and translate subtitles from MKV files using AI",
+		Use:   "gst [flags] <SUBTITLE_FILE|MKV_FILE|GLOB>...",
+		Short: "Translate one or more subtitle files (SRT, ASS) or extract and translate subtitles from MKV files using AI",
 		Long: `Gemini SRT Translator is a powerful tool to translate subtitle files using AI providers (Gemini, OpenAI).
-Supports both SRT files and MKV files with embedded subtitles.
+Supports both SRT and ASS subtitle files as well as MKV files with embedded subtitles.
 Perfect for anyone needing fast, accurate, and customizable translations for videos, movies, and series.`,
 		SilenceUsage:  true, // Don't show usage on errors
 		SilenceErrors: true, // Don't show errors automatically (we handle them in main)
@@ -548,7 +548,7 @@ func validateVideoFilePath(filePath string) bool {
 	}
 
 	extension := strings.ToLower(filepath.Ext(filePath))
-	supportedExts := []string{".srt", ".mkv"}
+	supportedExts := []string{".srt", ".ass", ".ssa", ".mkv"}
 
 	for _, ext := range supportedExts {
 		if extension == ext {
@@ -556,7 +556,7 @@ func validateVideoFilePath(filePath string) bool {
 		}
 	}
 
-	logger.Error(fmt.Sprintf("File must have .srt or .mkv extension: %s", filePath))
+	logger.Error(fmt.Sprintf("File must have .srt, .ass, .ssa, or .mkv extension: %s", filePath))
 	return false
 }
 

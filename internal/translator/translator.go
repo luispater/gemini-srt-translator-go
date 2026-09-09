@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ import (
 	"github.com/luispater/gemini-srt-translator-go/internal/logger"
 	"github.com/luispater/gemini-srt-translator-go/internal/providers"
 	"github.com/luispater/gemini-srt-translator-go/internal/video"
+	"github.com/luispater/gemini-srt-translator-go/pkg/ass"
 	"github.com/luispater/gemini-srt-translator-go/pkg/config"
 	"github.com/luispater/gemini-srt-translator-go/pkg/errors"
 	"github.com/luispater/gemini-srt-translator-go/pkg/languages"
@@ -90,8 +92,11 @@ type Translator struct {
 	translatedSubtitles []srt.Subtitle
 	prepared            bool
 	restartPending      bool
-	extractedSRTFile    string   // Path to SRT file extracted from MKV
+	extractedSRTFile    string   // Path to subtitle file extracted from MKV
 	cleanupFiles        []string // Files to clean up after translation
+	subtitleFormat      video.SubtitleFormat
+	assFile             *ass.File
+	assDialogues        []*ass.Dialogue
 }
 
 // NewTranslator creates a new translator instance
@@ -116,15 +121,20 @@ func NewTranslator(cfg *config.Config) *Translator {
 	// Set output file path
 	outputFile := cfg.OutputFile
 	if outputFile == "" {
-		suffix := "_translated.srt"
+		initialFormat := detectInitialSubtitleFormat(cfg)
+		ext := ".srt"
+		if initialFormat == video.SubtitleFormatASS {
+			ext = ".ass"
+		}
+		suffix := "_translated" + ext
 
 		tl := strings.ToLower(cfg.TargetLanguage)
 		if langCode, ok := languages.GetLanguageCode(tl); ok {
-			suffix = "." + langCode + ".srt"
+			suffix = "." + langCode + ext
 		}
 
 		if cfg.InputFile == "" {
-			suffix = ".srt"
+			suffix = ext
 		}
 		if dirPath != "" {
 			outputFile = filepath.Join(dirPath, baseName+suffix)
@@ -267,9 +277,37 @@ func (t *Translator) loadSubtitles(srtFile string) error {
 
 	sourceHash := sha256.Sum256(originalData)
 	t.sourceFingerprint = hex.EncodeToString(sourceHash[:])
-	originalSubtitles, errParseOriginal := srt.ParseSRT(string(originalData))
-	if errParseOriginal != nil {
-		return errors.NewFileError("failed to parse SRT file", errParseOriginal).WithContext("file_path", srtFile)
+
+	t.subtitleFormat = detectFileSubtitleFormat(srtFile, string(originalData))
+
+	var originalSubtitles []srt.Subtitle
+	if t.subtitleFormat == video.SubtitleFormatASS {
+		assFile, errParseOriginal := ass.ParseASS(string(originalData))
+		if errParseOriginal != nil {
+			return errors.NewFileError("failed to parse ASS file", errParseOriginal).WithContext("file_path", srtFile)
+		}
+		t.assFile = assFile
+		t.assDialogues = assFile.GetDialogues()
+		dialogues := t.assDialogues
+		originalSubtitles = make([]srt.Subtitle, len(dialogues))
+		for i, dlg := range dialogues {
+			content := ""
+			if dlg.IsTranslatable {
+				content = dlg.CleanText
+			}
+			originalSubtitles[i] = srt.Subtitle{
+				Index:   dlg.Index,
+				Start:   dlg.Start,
+				End:     dlg.End,
+				Content: content,
+			}
+		}
+	} else {
+		var errParseOriginal error
+		originalSubtitles, errParseOriginal = srt.ParseSRT(string(originalData))
+		if errParseOriginal != nil {
+			return errors.NewFileError("failed to parse SRT file", errParseOriginal).WithContext("file_path", srtFile)
+		}
 	}
 
 	loadExistingOutput := false
@@ -299,11 +337,41 @@ func (t *Translator) loadSubtitles(srtFile string) error {
 			logger.Warning(fmt.Sprintf("Failed to read existing translation. Starting from the beginning: %v", errReadTranslated))
 			t.restartFromBeginning()
 		} else {
-			translatedSubtitles, errReadTranslated = srt.ParseSRT(string(translatedData))
-			if errReadTranslated != nil {
-				logger.Warning(fmt.Sprintf("Failed to parse existing translation. Starting from the beginning: %v", errReadTranslated))
-				t.restartFromBeginning()
+			if t.subtitleFormat == video.SubtitleFormatASS {
+				existingASS, errParseExisting := ass.ParseASS(string(translatedData))
+				if errParseExisting != nil {
+					logger.Warning(fmt.Sprintf("Failed to parse existing translation. Starting from the beginning: %v", errParseExisting))
+					t.restartFromBeginning()
+				} else {
+					existingDialogues := existingASS.GetDialogues()
+					origDialogues := t.assFile.GetDialogues()
+					translatedSubtitles = make([]srt.Subtitle, len(existingDialogues))
+					for i, dlg := range existingDialogues {
+						content := ""
+						if dlg.IsTranslatable {
+							content = dlg.CleanText
+						}
+						translatedSubtitles[i] = srt.Subtitle{
+							Index:   dlg.Index,
+							Start:   dlg.Start,
+							End:     dlg.End,
+							Content: content,
+						}
+						if i < len(origDialogues) {
+							origDialogues[i].Text = dlg.Text
+							origDialogues[i].CleanText = dlg.CleanText
+						}
+					}
+				}
 			} else {
+				translatedSubtitles, errReadTranslated = srt.ParseSRT(string(translatedData))
+				if errReadTranslated != nil {
+					logger.Warning(fmt.Sprintf("Failed to parse existing translation. Starting from the beginning: %v", errReadTranslated))
+					t.restartFromBeginning()
+				}
+			}
+
+			if len(translatedSubtitles) > 0 {
 				logger.Info(fmt.Sprintf("Translated file %s already exists. Loading existing translation...\n", t.outputFile))
 				if t.config.StartLine == 0 {
 					for {
@@ -537,7 +605,12 @@ func (t *Translator) saveProgress(line int, translatedSubtitles []srt.Subtitle, 
 		}()
 	}
 
-	translatedContent := srt.ComposeSRT(translatedSubtitles)
+	var translatedContent string
+	if t.subtitleFormat == video.SubtitleFormatASS && t.assFile != nil {
+		translatedContent = ass.ComposeASS(t.assFile)
+	} else {
+		translatedContent = srt.ComposeSRT(translatedSubtitles)
+	}
 	if errWriteOutput := writeFileAtomically(t.outputFile, []byte(translatedContent), 0644); errWriteOutput != nil {
 		return fmt.Errorf("failed to write output file %s: %w", t.outputFile, errWriteOutput)
 	}
@@ -1130,17 +1203,35 @@ func (t *Translator) processTranslatedLines(translatedLines []srt.SubtitleObject
 		indexMap[item.Index] = i
 	}
 
+	var dialogues []*ass.Dialogue
+	if t.subtitleFormat == video.SubtitleFormatASS && t.assFile != nil {
+		if t.assDialogues != nil {
+			dialogues = t.assDialogues
+		} else {
+			dialogues = t.assFile.GetDialogues()
+		}
+	}
+
 	// Process each translated line
 	for _, line := range translatedLines {
 		index := line.Index
 
 		// Apply RTL detection and formatting
-		if t.isDominantRTL(line.Content) {
+		textForRTL := line.Content
+		if t.subtitleFormat == video.SubtitleFormatASS {
+			textForRTL = reASSTag.ReplaceAllString(textForRTL, "")
+		}
+
+		if t.isDominantRTL(textForRTL) {
 			translatedSubtitles[index].Content = "\u202b" + line.Content + "\u202c"
 		} else if len(line.Content) == 0 {
 			translatedSubtitles[index].Content = " "
 		} else {
 			translatedSubtitles[index].Content = line.Content
+		}
+
+		if dialogues != nil && index < len(dialogues) && dialogues[index].IsTranslatable {
+			dialogues[index].SetTranslatedText(translatedSubtitles[index].Content)
 		}
 	}
 
@@ -1161,8 +1252,59 @@ func (t *Translator) validateTranslatedResponse(translatedBatch []srt.SubtitleOb
 		if original.Guard != "" && translated.Guard != original.Guard {
 			return errors.NewTranslationError(fmt.Sprintf("provider returned mismatched guard for line %d", original.Index), nil).WithContext("line_index", original.Index).WithContext("expected_guard", original.Guard).WithContext("actual_guard", translated.Guard)
 		}
-		if translated.Content == "" && original.Content != "" && !t.isOnlyPunctuation(original.Content) {
+		origText := original.Content
+		transText := translated.Content
+		if t.subtitleFormat == video.SubtitleFormatASS {
+			origText = reASSTag.ReplaceAllString(origText, "")
+			transText = reASSTag.ReplaceAllString(transText, "")
+			// Also strip raw braces to ensure model didn't return only raw tag blocks without visible text
+			transText = reRawBrace.ReplaceAllString(transText, "")
+			// Also strip ASS layout escapes (\N, \n, \h) so only layout codes without visible text are rejected
+			transText = strings.ReplaceAll(transText, `\N`, "")
+			transText = strings.ReplaceAll(transText, `\n`, "")
+			transText = strings.ReplaceAll(transText, `\h`, "")
+		}
+
+		if strings.TrimSpace(transText) == "" && strings.TrimSpace(origText) != "" && !t.isOnlyPunctuation(origText) {
 			return errors.NewTranslationError(fmt.Sprintf("provider returned an empty translation for line %d", translated.Index), nil).WithContext("line_index", translated.Index)
+		}
+		if t.subtitleFormat == video.SubtitleFormatASS {
+			if errTags := validateASSTagPlaceholders(original.Content, translated.Content, translated.Index); errTags != nil {
+				return errTags
+			}
+		}
+	}
+
+	return nil
+}
+
+var (
+	reASSTag   = regexp.MustCompile(`\[\[ASSTAG\d+\]\]`)
+	reRawBrace = regexp.MustCompile(`\{[^}]*\}`)
+)
+
+func validateASSTagPlaceholders(original, translated string, lineIndex int) error {
+	origTags := reASSTag.FindAllString(original, -1)
+	transTags := reASSTag.FindAllString(translated, -1)
+	if len(transTags) != len(origTags) {
+		return errors.NewTranslationError(fmt.Sprintf("provider returned mismatched tag placeholder count for line %d. Expected %d tags, got %d", lineIndex, len(origTags), len(transTags)), nil).WithContext("line_index", lineIndex).WithContext("expected_tags", origTags).WithContext("actual_tags", transTags)
+	}
+	if len(origTags) == 0 {
+		return nil
+	}
+
+	origSet := make(map[string]int)
+	for _, tag := range origTags {
+		origSet[tag]++
+	}
+	transSet := make(map[string]int)
+	for _, tag := range transTags {
+		transSet[tag]++
+	}
+
+	for tag, count := range origSet {
+		if transSet[tag] != count {
+			return errors.NewTranslationError(fmt.Sprintf("provider altered tag placeholder %s for line %d", tag, lineIndex), nil).WithContext("line_index", lineIndex).WithContext("tag", tag)
 		}
 	}
 
@@ -1203,7 +1345,7 @@ func (t *Translator) isDominantRTL(text string) bool {
 	return rtlCount > ltrCount
 }
 
-// prepareSRTFile prepares the SRT file for translation (extracts from MKV if needed)
+// prepareSRTFile prepares the subtitle file for translation (extracts from MKV if needed)
 func (t *Translator) prepareSRTFile() (string, error) {
 	inputFile := t.config.InputFile
 
@@ -1218,11 +1360,66 @@ func (t *Translator) prepareSRTFile() (string, error) {
 		t.extractedSRTFile = newExtractedPath
 		t.cleanupFiles = append(t.cleanupFiles, newExtractedPath)
 		logger.Success(fmt.Sprintf("[%s] Subtitles extracted to: %s", filepath.Base(inputFile), newExtractedPath))
+
+		// If default outputFile was created with .srt but extracted subtitles are .ass, adjust outputFile extension
+		if t.config.OutputFile == "" {
+			if strings.EqualFold(filepath.Ext(newExtractedPath), ".ass") && strings.EqualFold(filepath.Ext(t.outputFile), ".srt") {
+				t.outputFile = strings.TrimSuffix(t.outputFile, filepath.Ext(t.outputFile)) + ".ass"
+				t.metadataFile = t.outputFile + ".gst-meta.json"
+			}
+		}
+
 		return newExtractedPath, nil
 	}
 
-	// For SRT files, return the original path
+	// For subtitle files, return the original path
 	return inputFile, nil
+}
+
+func detectInitialSubtitleFormat(cfg *config.Config) video.SubtitleFormat {
+	if cfg.InputFile == "" {
+		return video.SubtitleFormatSRT
+	}
+	ext := strings.ToLower(filepath.Ext(cfg.InputFile))
+	if ext == ".ass" || ext == ".ssa" {
+		return video.SubtitleFormatASS
+	}
+	if ext == ".mkv" {
+		tracks, errTracks := video.InspectSubtitleTracks(cfg.InputFile)
+		if errTracks == nil {
+			var selected *video.SubtitleTrack
+			if cfg.SubtitleTrack > 0 {
+				for i := range tracks {
+					if tracks[i].Number == cfg.SubtitleTrack {
+						selected = &tracks[i]
+						break
+					}
+				}
+			}
+			if selected == nil {
+				selected = video.SelectBestSubtitleTrack(tracks)
+			}
+			if selected != nil {
+				return video.DetectSubtitleCodecFormat(selected.Codec)
+			}
+		}
+	}
+	return video.SubtitleFormatSRT
+}
+
+func detectFileSubtitleFormat(filePath string, content string) video.SubtitleFormat {
+	ext := strings.ToLower(filepath.Ext(filePath))
+	if ext == ".ass" || ext == ".ssa" {
+		return video.SubtitleFormatASS
+	}
+	if ext == ".srt" {
+		return video.SubtitleFormatSRT
+	}
+	trimmed := strings.TrimSpace(strings.TrimPrefix(content, "\ufeff"))
+	if strings.HasPrefix(trimmed, "[Script Info]") || strings.Contains(trimmed, "[Events]") {
+		return video.SubtitleFormatASS
+	}
+	return video.SubtitleFormatSRT
 }
 
 // cleanup removes temporary files created during translation

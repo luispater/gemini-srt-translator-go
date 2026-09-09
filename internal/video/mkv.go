@@ -7,22 +7,43 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/luispater/matroska-go"
 
+	"github.com/luispater/gemini-srt-translator-go/pkg/ass"
 	"github.com/luispater/gemini-srt-translator-go/pkg/errors"
 	"github.com/luispater/gemini-srt-translator-go/pkg/srt"
 )
 
+// SubtitleFormat represents the subtitle format (srt, ass)
+type SubtitleFormat string
+
+const (
+	SubtitleFormatSRT SubtitleFormat = "srt"
+	SubtitleFormatASS SubtitleFormat = "ass"
+)
+
+// DetectSubtitleCodecFormat returns the subtitle format based on Matroska codec ID
+func DetectSubtitleCodecFormat(codecID string) SubtitleFormat {
+	upper := strings.ToUpper(strings.TrimSpace(codecID))
+	if strings.Contains(upper, "ASS") || strings.Contains(upper, "SSA") {
+		return SubtitleFormatASS
+	}
+	return SubtitleFormatSRT
+}
+
 // SubtitleTrack represents a subtitle track in an MKV file
 type SubtitleTrack struct {
-	Number   int
-	Language string
-	Name     string
-	Codec    string
-	Entries  []SubtitleEntry
+	Number       int
+	Language     string
+	Name         string
+	Codec        string
+	CodecPrivate []byte
+	Entries      []SubtitleEntry
 }
 
 // SubtitleEntry represents a single subtitle entry
@@ -102,11 +123,12 @@ func (p *MKVParser) parse(includePackets bool) (returnErr error) {
 		}
 		seenTracks[trackInfo.Number] = true
 		p.tracks = append(p.tracks, SubtitleTrack{
-			Number:   int(trackInfo.Number),
-			Language: trackInfo.Language,
-			Name:     trackInfo.Name,
-			Codec:    trackInfo.CodecID,
-			Entries:  []SubtitleEntry{},
+			Number:       int(trackInfo.Number),
+			Language:     trackInfo.Language,
+			Name:         trackInfo.Name,
+			Codec:        trackInfo.CodecID,
+			CodecPrivate: append([]byte(nil), trackInfo.CodecPrivate...),
+			Entries:      []SubtitleEntry{},
 		})
 	}
 
@@ -144,8 +166,8 @@ func (p *MKVParser) extractSubtitlePackets(demuxer *matroska.Demuxer) error {
 		}
 
 		// Convert packet data to text (assuming UTF-8)
-		text := strings.TrimSpace(string(packet.Data))
-		if text == "" {
+		text := strings.TrimRight(string(packet.Data), "\r\n")
+		if strings.TrimSpace(text) == "" {
 			continue // Skip empty packets
 		}
 
@@ -214,16 +236,41 @@ func (p *MKVParser) ExtractToSRT(track *SubtitleTrack, outputPath string) (retur
 		return errors.NewValidationError("subtitle track is empty", nil)
 	}
 
+	wrapStyle := 0
+	if DetectSubtitleCodecFormat(track.Codec) == SubtitleFormatASS {
+		if assFile, errParse := ass.ParseASS(string(track.CodecPrivate)); errParse == nil {
+			wrapStyle = assFile.GetWrapStyle()
+		}
+	}
+
 	// Convert subtitle entries to SRT format
 	var subtitles []srt.Subtitle
-	for i, entry := range track.Entries {
+	subtitleIdx := 1
+	for _, entry := range track.Entries {
+		content := entry.Text
+		if DetectSubtitleCodecFormat(track.Codec) == SubtitleFormatASS {
+			parts := strings.SplitN(content, ",", 9)
+			if len(parts) >= 9 {
+				rawText := parts[8]
+				cleanText, isTranslatable := ass.StripASSTagsToPlainText(rawText, wrapStyle)
+				if !isTranslatable {
+					continue
+				}
+				content = cleanText
+			}
+		}
 		subtitle := srt.Subtitle{
-			Index:   i + 1,
+			Index:   subtitleIdx,
 			Start:   entry.Start,
 			End:     entry.End,
-			Content: entry.Text,
+			Content: content,
 		}
 		subtitles = append(subtitles, subtitle)
+		subtitleIdx++
+	}
+
+	if len(subtitles) == 0 {
+		return errors.NewValidationError("no translatable subtitle entries in track", nil)
 	}
 
 	// Generate SRT content
@@ -250,6 +297,169 @@ func (p *MKVParser) ExtractToSRT(track *SubtitleTrack, outputPath string) (retur
 	}
 
 	return nil
+}
+
+// ExtractToASS extracts a subtitle track to ASS format
+func (p *MKVParser) ExtractToASS(track *SubtitleTrack, outputPath string) (returnErr error) {
+	if len(track.Entries) == 0 {
+		return errors.NewValidationError("subtitle track is empty", nil)
+	}
+
+	header := string(track.CodecPrivate)
+	if strings.TrimSpace(header) == "" {
+		header = defaultASSHeader()
+	}
+
+	assFile, errParse := ass.ParseASS(header)
+	if errParse != nil {
+		assFile, _ = ass.ParseASS(defaultASSHeader())
+	}
+
+	var eventsSection *ass.Section
+	for i := range assFile.Sections {
+		if assFile.Sections[i].IsEvents {
+			eventsSection = &assFile.Sections[i]
+			break
+		}
+	}
+	if eventsSection == nil {
+		newSec := ass.Section{
+			Header:     "[Events]",
+			IsEvents:   true,
+			FormatLine: "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+			Format:     []string{"Layer", "Start", "End", "Style", "Name", "MarginL", "MarginR", "MarginV", "Effect", "Text"},
+			Events:     []ass.Event{},
+		}
+		assFile.Sections = append(assFile.Sections, newSec)
+		eventsSection = &assFile.Sections[len(assFile.Sections)-1]
+	} else if len(eventsSection.Format) == 0 {
+		eventsSection.FormatLine = "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
+		eventsSection.Format = []string{"Layer", "Start", "End", "Style", "Name", "MarginL", "MarginR", "MarginV", "Effect", "Text"}
+	}
+
+	type assItem struct {
+		readOrder int
+		hasOrder  bool
+		event     ass.Event
+	}
+
+	items := make([]assItem, 0, len(track.Entries))
+	for i, entry := range track.Entries {
+		parts := strings.SplitN(entry.Text, ",", 9)
+		item := assItem{}
+
+		var dlg *ass.Dialogue
+		if len(parts) >= 9 {
+			if order, errOrder := strconv.Atoi(strings.TrimSpace(parts[0])); errOrder == nil {
+				item.readOrder = order
+				item.hasOrder = true
+			}
+			layer := parts[1]
+			style := parts[2]
+			name := parts[3]
+			marginL := parts[4]
+			marginR := parts[5]
+			marginV := parts[6]
+			effect := parts[7]
+			text := parts[8]
+
+			protected, tags, isTranslatable := ass.ExtractTags(text)
+			dlg = &ass.Dialogue{
+				Index:          i + 1,
+				Type:           "Dialogue",
+				Layer:          layer,
+				Start:          entry.Start,
+				End:            entry.End,
+				Style:          style,
+				Name:           name,
+				MarginL:        marginL,
+				MarginR:        marginR,
+				MarginV:        marginV,
+				Effect:         effect,
+				Text:           text,
+				CleanText:      protected,
+				Tags:           tags,
+				IsTranslatable: isTranslatable,
+			}
+		} else {
+			protected, tags, isTranslatable := ass.ExtractTags(entry.Text)
+			dlg = &ass.Dialogue{
+				Index:          i + 1,
+				Type:           "Dialogue",
+				Layer:          "0",
+				Start:          entry.Start,
+				End:            entry.End,
+				Style:          "Default",
+				Text:           entry.Text,
+				CleanText:      protected,
+				Tags:           tags,
+				IsTranslatable: isTranslatable,
+			}
+		}
+
+		item.event = ass.Event{
+			IsDialogue: true,
+			Dialogue:   dlg,
+		}
+		items = append(items, item)
+	}
+
+	allHaveOrder := true
+	for _, it := range items {
+		if !it.hasOrder {
+			allHaveOrder = false
+			break
+		}
+	}
+	if allHaveOrder {
+		sort.SliceStable(items, func(i, j int) bool {
+			return items[i].readOrder < items[j].readOrder
+		})
+	}
+
+	for _, it := range items {
+		eventsSection.Events = append(eventsSection.Events, it.event)
+	}
+
+	content := ass.ComposeASS(assFile)
+
+	file, errCreate := os.Create(outputPath)
+	if errCreate != nil {
+		return errors.NewFileError(fmt.Sprintf("failed to create output file: %s", outputPath), errCreate)
+	}
+	defer func() {
+		if errClose := file.Close(); errClose != nil {
+			returnErr = stdErrors.Join(returnErr, errors.NewFileError("failed to close ASS output file", errClose))
+		}
+	}()
+
+	writer := bufio.NewWriter(file)
+	if _, errWrite := writer.WriteString(content); errWrite != nil {
+		return errors.NewFileError("failed to write ASS content", errWrite)
+	}
+
+	if errFlush := writer.Flush(); errFlush != nil {
+		return errors.NewFileError("failed to flush ASS content", errFlush)
+	}
+
+	return nil
+}
+
+func defaultASSHeader() string {
+	return `[Script Info]
+ScriptType: v4.00+
+WrapStyle: 0
+ScaledBorderAndShadow: yes
+PlayResX: 1920
+PlayResY: 1080
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,2,2,2,10,10,10,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+`
 }
 
 // InspectSubtitleTracks returns MKV subtitle track metadata for interactive selection.
@@ -304,7 +514,12 @@ func ExtractSubtitlesFromMKV(mkvPath string, trackNumber int) (string, error) {
 	}
 
 	baseName := strings.TrimSuffix(filepath.Base(mkvPath), filepath.Ext(mkvPath))
-	tempFile, errCreateTemp := os.CreateTemp("", "gst-"+baseName+"-*.srt")
+	format := DetectSubtitleCodecFormat(selected.Codec)
+	ext := ".srt"
+	if format == SubtitleFormatASS {
+		ext = ".ass"
+	}
+	tempFile, errCreateTemp := os.CreateTemp("", "gst-"+baseName+"-*"+ext)
 	if errCreateTemp != nil {
 		return "", errors.NewFileError("failed to create temporary subtitle file", errCreateTemp)
 	}
@@ -313,7 +528,14 @@ func ExtractSubtitlesFromMKV(mkvPath string, trackNumber int) (string, error) {
 		_ = os.Remove(tempPath)
 		return "", errors.NewFileError("failed to close temporary subtitle file", errCloseTemp)
 	}
-	if errExtract := parser.ExtractToSRT(selected, tempPath); errExtract != nil {
+
+	var errExtract error
+	if format == SubtitleFormatASS {
+		errExtract = parser.ExtractToASS(selected, tempPath)
+	} else {
+		errExtract = parser.ExtractToSRT(selected, tempPath)
+	}
+	if errExtract != nil {
 		_ = os.Remove(tempPath)
 		return "", errExtract
 	}

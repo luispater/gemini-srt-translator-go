@@ -432,3 +432,26 @@ func TestDefaultModelForProvider(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateVideoFilePath(t *testing.T) {
+	tempDir := t.TempDir()
+
+	validExtensions := []string{".srt", ".ass", ".ssa", ".mkv"}
+	for _, ext := range validExtensions {
+		testFile := filepath.Join(tempDir, "sample"+ext)
+		if errWrite := os.WriteFile(testFile, []byte("content"), 0644); errWrite != nil {
+			t.Fatalf("Failed to create test file: %v", errWrite)
+		}
+		if !validateVideoFilePath(testFile) {
+			t.Errorf("validateVideoFilePath(%q) = false, want true", testFile)
+		}
+	}
+
+	invalidFile := filepath.Join(tempDir, "sample.txt")
+	if errWrite := os.WriteFile(invalidFile, []byte("content"), 0644); errWrite != nil {
+		t.Fatalf("Failed to create test file: %v", errWrite)
+	}
+	if validateVideoFilePath(invalidFile) {
+		t.Errorf("validateVideoFilePath(%q) = true, want false", invalidFile)
+	}
+}

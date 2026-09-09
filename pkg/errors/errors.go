@@ -8,20 +8,20 @@ import (
 type ErrorType string
 
 const (
-	ErrorTypeValidation   ErrorType = "validation"
-	ErrorTypeAPI          ErrorType = "api"
-	ErrorTypeFile         ErrorType = "file"
-	ErrorTypeTranslation  ErrorType = "translation"
+	ErrorTypeValidation    ErrorType = "validation"
+	ErrorTypeAPI           ErrorType = "api"
+	ErrorTypeFile          ErrorType = "file"
+	ErrorTypeTranslation   ErrorType = "translation"
 	ErrorTypeConfiguration ErrorType = "configuration"
-	ErrorTypeNetwork      ErrorType = "network"
+	ErrorTypeNetwork       ErrorType = "network"
 )
 
 // TranslatorError represents a structured error with context
 type TranslatorError struct {
-	Type     ErrorType
-	Message  string
-	Cause    error
-	Context  map[string]interface{}
+	Type    ErrorType
+	Message string
+	Cause   error
+	Context map[string]interface{}
 }
 
 // Error implements the error interface
