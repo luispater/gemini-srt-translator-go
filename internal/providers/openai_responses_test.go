@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/openai/openai-go/responses"
+
 	"github.com/luispater/gemini-srt-translator-go/pkg/config"
 	"github.com/luispater/gemini-srt-translator-go/pkg/srt"
 )
@@ -741,4 +743,354 @@ func responsesTestBody(output string) string {
 		"status":"completed",
 		"output":%s
 	}`, output)
+}
+
+func TestOpenAIResponsesIgnoresEmptyAssistantMessageInContext(t *testing.T) {
+	translatedRecords := []srt.SubtitleObject{
+		{Index: 1, Content: "第一句", Guard: "GST_LINE_000001"},
+	}
+	submitArguments, errMarshal := json.Marshal(submitTranslationsArguments{Records: translatedRecords})
+	if errMarshal != nil {
+		t.Fatalf("failed to marshal submission arguments: %v", errMarshal)
+	}
+
+	responseBodies := []string{
+		// Batch 1: read response
+		responsesTestBody(`[
+			{"type":"reasoning","id":"rs_read","summary":[{"type":"summary_text","text":"read batch"}],"status":"completed"},
+			{"type":"function_call","id":"fc_read","call_id":"call_read","name":"read_translation_batch","arguments":"{}","status":"completed"}
+		]`),
+		// Batch 1: submit response with an empty assistant message (common in upstream stream outputs)
+		responsesTestBody(fmt.Sprintf(`[
+			{"type":"reasoning","id":"rs_submit","summary":[{"type":"summary_text","text":"translated"}],"status":"completed"},
+			{"type":"message","id":"msg_empty","role":"assistant","status":"completed","content":[]},
+			{"type":"function_call","id":"fc_submit","call_id":"call_submit","name":"submit_translations","arguments":%q,"status":"completed"}
+		]`, submitArguments)),
+		// Batch 2: read response
+		responsesTestBody(`[
+			{"type":"function_call","id":"fc_read_2","call_id":"call_read_2","name":"read_translation_batch","arguments":"{}","status":"completed"}
+		]`),
+		// Batch 2: submit response
+		responsesTestBody(fmt.Sprintf(`[
+			{"type":"function_call","id":"fc_submit_2","call_id":"call_submit_2","name":"submit_translations","arguments":%q,"status":"completed"}
+		]`, submitArguments)),
+	}
+
+	var requestBodies [][]byte
+	var mutex sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+		body, errReadAll := io.ReadAll(request.Body)
+		if errReadAll != nil {
+			http.Error(responseWriter, errReadAll.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		mutex.Lock()
+		requestIndex := len(requestBodies)
+		requestBodies = append(requestBodies, body)
+		mutex.Unlock()
+
+		if requestIndex >= len(responseBodies) {
+			http.Error(responseWriter, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		responseWriter.Header().Set("Content-Type", "application/json")
+		_, _ = responseWriter.Write([]byte(responseBodies[requestIndex]))
+	}))
+	defer server.Close()
+
+	provider, errNewProvider := NewOpenAIProvider(&config.Config{
+		Provider:       "openai",
+		OpenAIProtocol: "responses",
+		APIKeys:        []string{"test-key"},
+		BaseURL:        server.URL + "/v1",
+	})
+	if errNewProvider != nil {
+		t.Fatalf("NewOpenAIProvider() error = %v", errNewProvider)
+	}
+
+	batch := []srt.SubtitleObject{
+		{Index: 1, Content: "First source", Guard: "GST_LINE_000001"},
+	}
+	cfg := &TranslationConfig{
+		ModelName:      "gpt-test",
+		TargetLanguage: "Simplified Chinese",
+		Streaming:      false,
+	}
+
+	result1, errTranslate1 := provider.TranslateBatch(context.Background(), batch, nil, cfg)
+	if errTranslate1 != nil {
+		t.Fatalf("TranslateBatch(batch1) error = %v", errTranslate1)
+	}
+
+	// Verify that empty assistant message was not retained in context
+	for _, ctxMsg := range result1.Context {
+		if len(ctxMsg.RawItem) > 0 && strings.Contains(string(ctxMsg.RawItem), "msg_empty") {
+			t.Errorf("expected empty assistant message to be stripped from context, got: %s", string(ctxMsg.RawItem))
+		}
+	}
+
+	// Now run batch 2 with previousContext from batch 1
+	_, errTranslate2 := provider.TranslateBatch(context.Background(), batch, result1.Context, cfg)
+	if errTranslate2 != nil {
+		t.Fatalf("TranslateBatch(batch2) error = %v", errTranslate2)
+	}
+
+	mutex.Lock()
+	capturedBodies := append([][]byte(nil), requestBodies...)
+	mutex.Unlock()
+
+	if len(capturedBodies) < 3 {
+		t.Fatalf("expected at least 3 captured requests, got %d", len(capturedBodies))
+	}
+
+	// Request 3 is the first request of Batch 2, which receives restored context
+	batch2FirstReq := capturedBodies[2]
+	var reqData struct {
+		Input []json.RawMessage `json:"input"`
+	}
+	if errUnmarshal := json.Unmarshal(batch2FirstReq, &reqData); errUnmarshal != nil {
+		t.Fatalf("failed to unmarshal batch 2 request body: %v", errUnmarshal)
+	}
+
+	for inputIdx, rawItem := range reqData.Input {
+		rawStr := string(rawItem)
+		if strings.Contains(rawStr, `"message"`) && !strings.Contains(rawStr, `"content"`) {
+			t.Errorf("batch 2 request input[%d] contains invalid message missing content field: %s", inputIdx, rawStr)
+		}
+	}
+}
+
+func TestResponseInputFromContextFiltersEmptyAssistantMessages(t *testing.T) {
+	testCases := []struct {
+		name     string
+		msg      ContextMessage
+		wantKept bool
+	}{
+		{
+			name:     "raw assistant without content field",
+			msg:      ContextMessage{RawItem: []byte(`{"role":"assistant","type":"message"}`)},
+			wantKept: false,
+		},
+		{
+			name:     "raw completed assistant with empty content array",
+			msg:      ContextMessage{RawItem: []byte(`{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[]}`)},
+			wantKept: false,
+		},
+		{
+			name:     "raw completed assistant with whitespace content array",
+			msg:      ContextMessage{RawItem: []byte(`{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[   ]}`)},
+			wantKept: false,
+		},
+		{
+			name:     "raw completed assistant with null content",
+			msg:      ContextMessage{RawItem: []byte(`{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":null}`)},
+			wantKept: false,
+		},
+		{
+			name:     "raw completed assistant with blank string content",
+			msg:      ContextMessage{RawItem: []byte(`{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":"   "}`)},
+			wantKept: false,
+		},
+		{
+			name:     "raw completed assistant with empty text block",
+			msg:      ContextMessage{RawItem: []byte(`{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"  "}]}`)},
+			wantKept: false,
+		},
+		{
+			name:     "plain assistant message with empty content",
+			msg:      ContextMessage{Role: "assistant", Content: "   "},
+			wantKept: false,
+		},
+		{
+			name:     "raw assistant message with valid text content",
+			msg:      ContextMessage{RawItem: []byte(`{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"hello"}]}`)},
+			wantKept: true,
+		},
+		{
+			name:     "raw assistant message with refusal content",
+			msg:      ContextMessage{RawItem: []byte(`{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"refusal","refusal":"cannot comply"}]}`)},
+			wantKept: true,
+		},
+		{
+			name:     "raw assistant message with multiple text blocks preserved",
+			msg:      ContextMessage{RawItem: []byte(`{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"part 1"},{"type":"output_text","text":"part 2"}]}`)},
+			wantKept: true,
+		},
+		{
+			name:     "raw user message with empty text block preserved",
+			msg:      ContextMessage{RawItem: []byte(`{"id":"msg_u","type":"message","role":"user","content":[{"type":"input_image","image_url":"https://example.com/img.png"}]}`)},
+			wantKept: true,
+		},
+		{
+			name:     "raw function call item preserved",
+			msg:      ContextMessage{RawItem: []byte(`{"id":"fc_1","type":"function_call","call_id":"call_1","name":"read_translation_batch","arguments":"{}"}`)},
+			wantKept: true,
+		},
+		{
+			name:     "raw reasoning item preserved",
+			msg:      ContextMessage{RawItem: []byte(`{"id":"rs_1","type":"reasoning","summary":[{"type":"summary_text","text":"thought"}]}`)},
+			wantKept: true,
+		},
+		{
+			name:     "plain user message preserved",
+			msg:      ContextMessage{Role: "user", Content: "Translate next batch"},
+			wantKept: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			input, errInput := responseInputFromContext([]ContextMessage{tc.msg})
+			if errInput != nil {
+				t.Fatalf("responseInputFromContext() error = %v", errInput)
+			}
+			if tc.wantKept && len(input) != 1 {
+				t.Errorf("expected item to be kept in input, got len = %d", len(input))
+			}
+			if !tc.wantKept && len(input) != 0 {
+				t.Errorf("expected item to be filtered from input, got len = %d", len(input))
+			}
+		})
+	}
+}
+
+func TestAppendResponseOutputFiltersEmptyAssistantMessages(t *testing.T) {
+	testCases := []struct {
+		name     string
+		rawJSON  string
+		wantKept bool
+	}{
+		{
+			name:     "empty message with no content",
+			rawJSON:  `[{"id":"msg_1","type":"message","role":"assistant","status":"completed"}]`,
+			wantKept: false,
+		},
+		{
+			name:     "empty message with empty content array",
+			rawJSON:  `[{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[]}]`,
+			wantKept: false,
+		},
+		{
+			name:     "empty message with blank text block",
+			rawJSON:  `[{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"   "}]}]`,
+			wantKept: false,
+		},
+		{
+			name:     "non-assistant message with empty text block preserved",
+			rawJSON:  `[{"id":"msg_u","type":"message","role":"user","status":"completed","content":[{"type":"input_image","image_url":"https://example.com/img.png"}]}]`,
+			wantKept: true,
+		},
+		{
+			name:     "valid message with text",
+			rawJSON:  `[{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"translated"}]}]`,
+			wantKept: true,
+		},
+		{
+			name:     "valid message with refusal",
+			rawJSON:  `[{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"refusal","refusal":"cannot comply"}]}]`,
+			wantKept: true,
+		},
+		{
+			name:     "valid message with multiple text blocks",
+			rawJSON:  `[{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"first"},{"type":"output_text","text":"second"}]}]`,
+			wantKept: true,
+		},
+		{
+			name:     "function call item",
+			rawJSON:  `[{"id":"fc_1","type":"function_call","call_id":"call_1","name":"submit_translations","arguments":"{}"}]`,
+			wantKept: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var outputs []responses.ResponseOutputItemUnion
+			if errUnmarshal := json.Unmarshal([]byte(tc.rawJSON), &outputs); errUnmarshal != nil {
+				t.Fatalf("json.Unmarshal() error = %v", errUnmarshal)
+			}
+			var contextMsgs []ContextMessage
+			input, errAppend := appendResponseOutput(nil, &contextMsgs, outputs)
+			if errAppend != nil {
+				t.Fatalf("appendResponseOutput() error = %v", errAppend)
+			}
+			if tc.wantKept {
+				if len(input) != 1 || len(contextMsgs) != 1 {
+					t.Errorf("expected output to be kept: input=%d, context=%d", len(input), len(contextMsgs))
+				}
+			} else {
+				if len(input) != 0 || len(contextMsgs) != 0 {
+					t.Errorf("expected output to be filtered: input=%d, context=%d", len(input), len(contextMsgs))
+				}
+			}
+		})
+	}
+}
+
+func TestUnmarshalResponseInputItemPreservesOutputMessageContent(t *testing.T) {
+	raw := `{
+		"content": [
+			{
+				"type": "output_text",
+				"text": "I have the batch and will submit the full Simplified Chinese translation now.",
+				"logprobs": [],
+				"annotations": []
+			}
+		],
+		"id": "msg_30edaecc-c3ad-9e43-a76e-bac8a05b4190",
+		"role": "assistant",
+		"type": "message",
+		"status": "completed"
+	}`
+
+	item, errUnmarshal := unmarshalResponseInputItem([]byte(raw))
+	if errUnmarshal != nil {
+		t.Fatalf("unmarshalResponseInputItem() error = %v", errUnmarshal)
+	}
+
+	data, errMarshal := json.Marshal(item)
+	if errMarshal != nil {
+		t.Fatalf("json.Marshal() error = %v", errMarshal)
+	}
+
+	serialized := string(data)
+	if !strings.Contains(serialized, `"content"`) {
+		t.Errorf("expected serialized item to preserve content, got: %s", serialized)
+	}
+	if !strings.Contains(serialized, "I have the batch and will submit") {
+		t.Errorf("expected serialized item to preserve text, got: %s", serialized)
+	}
+}
+
+func TestSanitizeResponsesInputFiltersCorruptedAssistantMessages(t *testing.T) {
+	corruptedAssistant := responses.ResponseInputItemUnionParam{
+		OfMessage: &responses.EasyInputMessageParam{
+			Role: responses.EasyInputMessageRoleAssistant,
+			Type: responses.EasyInputMessageTypeMessage,
+		},
+	}
+	validMsg := responses.ResponseInputItemParamOfMessage("hello", responses.EasyInputMessageRoleUser)
+	itemRef := responses.ResponseInputItemParamOfItemReference("msg_ref_123")
+	input := responses.ResponseInputParam{corruptedAssistant, validMsg, itemRef}
+
+	sanitized := sanitizeResponsesInput(input)
+	if len(sanitized) != 2 {
+		t.Fatalf("expected 2 items after sanitizing, got %d", len(sanitized))
+	}
+
+	data0, errMarshal0 := json.Marshal(sanitized[0])
+	if errMarshal0 != nil {
+		t.Fatalf("json.Marshal(sanitized[0]) error = %v", errMarshal0)
+	}
+	if !strings.Contains(string(data0), "hello") {
+		t.Errorf("expected valid user message to be kept, got: %s", string(data0))
+	}
+
+	data1, errMarshal1 := json.Marshal(sanitized[1])
+	if errMarshal1 != nil {
+		t.Fatalf("json.Marshal(sanitized[1]) error = %v", errMarshal1)
+	}
+	if !strings.Contains(string(data1), "msg_ref_123") {
+		t.Errorf("expected item reference to be preserved, got: %s", string(data1))
+	}
 }

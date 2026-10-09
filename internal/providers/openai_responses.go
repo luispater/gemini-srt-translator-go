@@ -135,9 +135,11 @@ func (o *OpenAIProvider) sendResponsesRequest(ctx context.Context, input respons
 		return nil, errPromptCacheKey
 	}
 
+	sanitizedInput := sanitizeResponsesInput(input)
+
 	params := responses.ResponseNewParams{
 		Instructions:      openai.String(instruction),
-		Input:             responses.ResponseNewParamsInputUnion{OfInputItemList: input},
+		Input:             responses.ResponseNewParamsInputUnion{OfInputItemList: sanitizedInput},
 		Model:             openai.ResponsesModel(translationConfig.ModelName),
 		Include:           []responses.ResponseIncludable{responses.ResponseIncludableReasoningEncryptedContent},
 		ParallelToolCalls: openai.Bool(false),
@@ -416,9 +418,12 @@ func responseInputFromContext(contextMessages []ContextMessage) (responses.Respo
 	input := make(responses.ResponseInputParam, 0, len(contextMessages))
 	for contextIndex, message := range contextMessages {
 		if len(message.RawItem) > 0 {
-			var item responses.ResponseInputItemUnionParam
-			if err := json.Unmarshal(message.RawItem, &item); err != nil {
-				return nil, fmt.Errorf("invalid raw Responses context item %d (%s): %w", contextIndex, message.RawItem, err)
+			if isEmptyRawResponsesMessage(message.RawItem) {
+				continue
+			}
+			item, errUnmarshal := unmarshalResponseInputItem(message.RawItem)
+			if errUnmarshal != nil {
+				return nil, fmt.Errorf("invalid raw Responses context item %d (%s): %w", contextIndex, message.RawItem, errUnmarshal)
 			}
 			input = append(input, item)
 			continue
@@ -433,6 +438,9 @@ func responseInputFromContext(contextMessages []ContextMessage) (responses.Respo
 		case "developer":
 			role = responses.EasyInputMessageRoleDeveloper
 		}
+		if role == responses.EasyInputMessageRoleAssistant && strings.TrimSpace(message.Content) == "" {
+			continue
+		}
 		input = append(input, responses.ResponseInputItemParamOfMessage(message.Content, role))
 	}
 	return input, nil
@@ -440,23 +448,133 @@ func responseInputFromContext(contextMessages []ContextMessage) (responses.Respo
 
 func appendResponseOutput(input responses.ResponseInputParam, contextMessages *[]ContextMessage, output []responses.ResponseOutputItemUnion) (responses.ResponseInputParam, error) {
 	for _, outputItem := range output {
+		if isEmptyResponseOutputMessage(outputItem) {
+			continue
+		}
 		rawItem := json.RawMessage(outputItem.RawJSON())
 		if len(rawItem) == 0 {
-			marshaledItem, err := json.Marshal(outputItem)
-			if err != nil {
-				return nil, fmt.Errorf("failed to marshal Responses output item: %w", err)
+			marshaledItem, errMarshal := json.Marshal(outputItem)
+			if errMarshal != nil {
+				return nil, fmt.Errorf("failed to marshal Responses output item: %w", errMarshal)
 			}
 			rawItem = marshaledItem
 		}
+		if isEmptyRawResponsesMessage(rawItem) {
+			continue
+		}
 
-		var inputItem responses.ResponseInputItemUnionParam
-		if err := json.Unmarshal(rawItem, &inputItem); err != nil {
-			return nil, fmt.Errorf("failed to convert Responses output item to input: %w", err)
+		inputItem, errUnmarshal := unmarshalResponseInputItem(rawItem)
+		if errUnmarshal != nil {
+			return nil, fmt.Errorf("failed to convert Responses output item to input: %w", errUnmarshal)
 		}
 		input = append(input, inputItem)
 		*contextMessages = append(*contextMessages, ContextMessage{RawItem: append(json.RawMessage(nil), rawItem...)})
 	}
 	return input, nil
+}
+
+func unmarshalResponseInputItem(raw []byte) (responses.ResponseInputItemUnionParam, error) {
+	var outMsg responses.ResponseOutputMessageParam
+	if errOut := json.Unmarshal(raw, &outMsg); errOut == nil && outMsg.Role == "assistant" && len(outMsg.Content) > 0 {
+		return responses.ResponseInputItemUnionParam{
+			OfOutputMessage: &outMsg,
+		}, nil
+	}
+
+	var item responses.ResponseInputItemUnionParam
+	if errUnmarshal := json.Unmarshal(raw, &item); errUnmarshal != nil {
+		return responses.ResponseInputItemUnionParam{}, errUnmarshal
+	}
+	return item, nil
+}
+
+func sanitizeResponsesInput(input responses.ResponseInputParam) responses.ResponseInputParam {
+	sanitized := make(responses.ResponseInputParam, 0, len(input))
+	for _, item := range input {
+		data, errMarshal := json.Marshal(item)
+		if errMarshal != nil {
+			continue
+		}
+		var probe struct {
+			Role    string          `json:"role"`
+			Type    string          `json:"type"`
+			Content json.RawMessage `json:"content"`
+		}
+		if errProbe := json.Unmarshal(data, &probe); errProbe == nil {
+			isAssistant := probe.Role == "assistant" || probe.Role == "model"
+			if isAssistant && (len(probe.Content) == 0 || string(probe.Content) == "null") {
+				continue
+			}
+		}
+		sanitized = append(sanitized, item)
+	}
+	return sanitized
+}
+
+func isEmptyResponseOutputMessage(item responses.ResponseOutputItemUnion) bool {
+	if item.Type != "message" {
+		return false
+	}
+	if item.Role != "" && item.Role != "assistant" {
+		return false
+	}
+	if len(item.Content) == 0 {
+		return true
+	}
+	for _, content := range item.Content {
+		if content.Type != "" && content.Type != "output_text" && content.Type != "refusal" {
+			return false
+		}
+		if strings.TrimSpace(content.Text) != "" || strings.TrimSpace(content.Refusal) != "" {
+			return false
+		}
+	}
+	return true
+}
+
+func isEmptyRawResponsesMessage(raw []byte) bool {
+	var probe struct {
+		Type    string          `json:"type"`
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+	}
+	if errUnmarshal := json.Unmarshal(raw, &probe); errUnmarshal != nil {
+		return false
+	}
+	isAssistant := probe.Role == "assistant" || probe.Role == "model"
+	if !isAssistant && probe.Role != "" {
+		return false
+	}
+	if probe.Type != "" && probe.Type != "message" {
+		return false
+	}
+	trimmed := strings.TrimSpace(string(probe.Content))
+	if len(probe.Content) == 0 || trimmed == "" || trimmed == "null" {
+		return true
+	}
+	var textContent string
+	if errStr := json.Unmarshal(probe.Content, &textContent); errStr == nil {
+		return strings.TrimSpace(textContent) == ""
+	}
+	var arrayContent []map[string]any
+	if errArr := json.Unmarshal(probe.Content, &arrayContent); errArr == nil {
+		if len(arrayContent) == 0 {
+			return true
+		}
+		for _, block := range arrayContent {
+			if blockType, ok := block["type"].(string); ok && blockType != "output_text" && blockType != "text" && blockType != "refusal" {
+				return false
+			}
+			if textVal, ok := block["text"].(string); ok && strings.TrimSpace(textVal) != "" {
+				return false
+			}
+			if refusalVal, ok := block["refusal"].(string); ok && strings.TrimSpace(refusalVal) != "" {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 func appendResponseInputContext(contextMessages *[]ContextMessage, inputItem responses.ResponseInputItemUnionParam) error {
