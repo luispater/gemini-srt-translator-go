@@ -439,6 +439,161 @@ func TestMultiProgressRendersTaskRowsCentrally(t *testing.T) {
 	}
 }
 
+func TestMultiProgressFreezesCompletedAndFailedTaskRuntimes(t *testing.T) {
+	originalQuiet := quietMode
+	originalColors := useColors
+	quietMode = false
+	useColors = false
+	defer func() {
+		quietMode = originalQuiet
+		useColors = originalColors
+	}()
+
+	var output bytes.Buffer
+	multiProgress := newMultiProgress(&output, time.Hour)
+	firstBar := multiProgress.AddBar("episode-01.srt")
+	secondBar := multiProgress.AddBar("episode-02.srt")
+	thirdBar := multiProgress.AddBar("episode-03.srt")
+	firstBar.SetTotal(10)
+	secondBar.SetTotal(10)
+	thirdBar.SetTotal(10)
+
+	multiProgress.Start()
+
+	firstBar.Update(10)
+	firstBar.Complete()
+	if firstBar.endTime.IsZero() {
+		t.Fatal("Complete() did not record endTime")
+	}
+	firstBar.mu.Lock()
+	firstBar.startTime = firstBar.endTime.Add(-(2*time.Minute + 15*time.Second))
+	firstBar.mu.Unlock()
+
+	secondBar.Update(3)
+	secondBar.Fail(fmt.Errorf("rate limit exceeded"))
+	if secondBar.endTime.IsZero() {
+		t.Fatal("Fail() did not record endTime")
+	}
+	secondBar.mu.Lock()
+	secondBar.startTime = secondBar.endTime.Add(-45 * time.Second)
+	secondBar.mu.Unlock()
+
+	thirdBar.Update(10)
+	thirdBar.Stop()
+	if thirdBar.endTime.IsZero() {
+		t.Fatal("Stop() did not record endTime")
+	}
+	thirdBar.mu.Lock()
+	thirdBar.startTime = thirdBar.endTime.Add(-(9*time.Minute + 42*time.Second))
+	thirdBar.mu.Unlock()
+	thirdBar.Complete()
+
+	multiProgress.Stop()
+
+	segments := strings.Split(output.String(), "\033[J")
+	finalRender := segments[len(segments)-1]
+
+	for _, expected := range []string{
+		"episode-01.srt\nRuntime: 00:02:15",
+		"episode-02.srt\nRuntime: 00:00:45",
+		"episode-03.srt\nRuntime: 00:09:42",
+	} {
+		if !strings.Contains(finalRender, expected) {
+			t.Errorf("Final render does not contain %q:\n%s", expected, finalRender)
+		}
+	}
+}
+
+func TestProgressBarTerminalMethodsRecordAndPreserveEndTime(t *testing.T) {
+	tests := []struct {
+		name      string
+		terminate func(pb *ProgressBar)
+	}{
+		{
+			name: "Complete records endTime",
+			terminate: func(pb *ProgressBar) {
+				pb.Complete()
+			},
+		},
+		{
+			name: "Fail records endTime",
+			terminate: func(pb *ProgressBar) {
+				pb.Fail(fmt.Errorf("task error"))
+			},
+		},
+		{
+			name: "Stop records endTime",
+			terminate: func(pb *ProgressBar) {
+				pb.Stop()
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			multiProgress := newMultiProgress(&bytes.Buffer{}, time.Hour)
+			bar := multiProgress.AddBar("episode.srt")
+
+			before := time.Now()
+			tt.terminate(bar)
+			after := time.Now()
+
+			if bar.endTime.IsZero() {
+				t.Fatal("Expected endTime to be recorded, got zero time")
+			}
+			if bar.endTime.Before(before) || bar.endTime.After(after) {
+				t.Errorf("endTime = %v, want between %v and %v", bar.endTime, before, after)
+			}
+
+			recordedEndTime := bar.endTime
+			time.Sleep(5 * time.Millisecond)
+			bar.Complete()
+			bar.Fail(fmt.Errorf("another error"))
+			bar.Stop()
+
+			if !bar.endTime.Equal(recordedEndTime) {
+				t.Errorf("endTime changed after subsequent terminal calls: got %v, want %v", bar.endTime, recordedEndTime)
+			}
+		})
+	}
+}
+
+func TestStandaloneProgressBarCompleteDoesNotSkipStop(t *testing.T) {
+	originalQuiet := quietMode
+	quietMode = true
+	defer func() {
+		quietMode = originalQuiet
+	}()
+
+	pb := NewProgressBar(10, "Test")
+	pb.Complete()
+	if !pb.isRunning {
+		t.Error("Expected standalone ProgressBar to remain running until Stop() performs final render")
+	}
+	pb.Stop()
+	if pb.isRunning {
+		t.Error("Expected standalone ProgressBar to stop after Stop()")
+	}
+}
+
+func TestElapsedDuration(t *testing.T) {
+	now := time.Now()
+	if got := elapsedDuration(time.Time{}, now); got != 0 {
+		t.Errorf("elapsedDuration(zero, now) = %v, want 0", got)
+	}
+	if got := elapsedDuration(now, now.Add(-time.Second)); got != 0 {
+		t.Errorf("elapsedDuration(now, before) = %v, want 0", got)
+	}
+	wantFixed := 3*time.Minute + 7*time.Second
+	if got := elapsedDuration(now, now.Add(wantFixed)); got != wantFixed {
+		t.Errorf("elapsedDuration(now, now+want) = %v, want %v", got, wantFixed)
+	}
+	runningStart := time.Now().Add(-2 * time.Second)
+	if got := elapsedDuration(runningStart, time.Time{}); got < 2*time.Second || got > 5*time.Second {
+		t.Errorf("elapsedDuration(runningStart, zero) = %v, want ~2s", got)
+	}
+}
+
 func TestMultiProgressUsesComponentColors(t *testing.T) {
 	originalColors := useColors
 	useColors = true

@@ -170,6 +170,7 @@ type ProgressBar struct {
 	taskLogs   []LogMessage
 	lastHeight int
 	startTime  time.Time
+	endTime    time.Time
 	retryCount int
 	status     string
 	isRunning  bool
@@ -227,6 +228,9 @@ func (pb *ProgressBar) Complete() {
 	pb.isLoading = false
 	pb.isThinking = false
 	pb.isSending = false
+	if pb.endTime.IsZero() {
+		pb.endTime = time.Now()
+	}
 	pb.status = "Completed"
 	pb.addTaskLogLocked(pb.status, Green)
 }
@@ -238,6 +242,9 @@ func (pb *ProgressBar) Fail(err error) {
 	pb.isLoading = false
 	pb.isThinking = false
 	pb.isSending = false
+	if pb.endTime.IsZero() {
+		pb.endTime = time.Now()
+	}
 	pb.status = terminalLine(fmt.Sprintf("Failed: %v", err))
 	pb.addTaskLogLocked(pb.status, Red)
 }
@@ -361,7 +368,11 @@ func (pb *ProgressBar) AddRetry() {
 func (pb *ProgressBar) Stop() {
 	pb.mu.Lock()
 	defer pb.mu.Unlock()
+	if pb.endTime.IsZero() {
+		pb.endTime = time.Now()
+	}
 	if pb.managed {
+		pb.isRunning = false
 		return
 	}
 	if pb.isRunning {
@@ -420,7 +431,7 @@ func (pb *ProgressBar) renderInternal() {
 	percentage := int(progress * 100)
 
 	// Calculate runtime
-	elapsed := time.Since(pb.startTime)
+	elapsed := elapsedDuration(pb.startTime, pb.endTime)
 	hours := int(elapsed.Hours())
 	minutes := int(elapsed.Minutes()) % 60
 	seconds := int(elapsed.Seconds()) % 60
@@ -589,6 +600,7 @@ type progressBarSnapshot struct {
 	chunkSize  int
 	retryCount int
 	startTime  time.Time
+	endTime    time.Time
 	messages   []string
 }
 
@@ -608,6 +620,7 @@ func (pb *ProgressBar) snapshot() progressBarSnapshot {
 		chunkSize:  pb.chunkSize,
 		retryCount: pb.retryCount,
 		startTime:  pb.startTime,
+		endTime:    pb.endTime,
 		messages:   append([]string(nil), pb.messages...),
 	}
 }
@@ -692,7 +705,7 @@ func (mp *MultiProgress) renderProgressLine(snapshot progressBarSnapshot) string
 		status = "Running"
 	}
 
-	elapsed := time.Since(snapshot.startTime)
+	elapsed := elapsedDuration(snapshot.startTime, snapshot.endTime)
 	runtimeText := fmt.Sprintf("%02d:%02d:%02d", int(elapsed.Hours()), int(elapsed.Minutes())%60, int(elapsed.Seconds())%60)
 	line := fmt.Sprintf("Runtime: %s |%s| %d%% (%s) | %s", runtimeText, bar, int(progress*100), countText, status)
 	if snapshot.retryCount > 0 {
@@ -719,6 +732,21 @@ func (mp *MultiProgress) renderProgressLine(snapshot progressBarSnapshot) string
 		line = strings.Replace(line, " | Retries: "+retryCount, " | Retries: "+colorize(Yellow, retryCount), 1)
 	}
 	return line
+}
+
+// elapsedDuration returns the task runtime between startTime and endTime, or up to now while running.
+func elapsedDuration(startTime, endTime time.Time) time.Duration {
+	if startTime.IsZero() {
+		return 0
+	}
+	if endTime.IsZero() {
+		endTime = time.Now()
+	}
+	elapsed := endTime.Sub(startTime)
+	if elapsed < 0 {
+		return 0
+	}
+	return elapsed
 }
 
 func wrapTerminalLine(value string, terminalWidth int) []string {
