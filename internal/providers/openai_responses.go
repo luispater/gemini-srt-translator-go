@@ -35,8 +35,8 @@ type submitTranslationsArguments struct {
 // translateBatchWithResponses translates subtitles through the Responses function-calling protocol.
 func (o *OpenAIProvider) translateBatchWithResponses(ctx context.Context, batch []srt.SubtitleObject, previousContext []ContextMessage, translationConfig *TranslationConfig) (*TranslationResponse, error) {
 	if o.client == nil {
-		if err := o.createClient(); err != nil {
-			return nil, err
+		if errCreateClient := o.createClient(); errCreateClient != nil {
+			return nil, errCreateClient
 		}
 	}
 
@@ -46,7 +46,7 @@ func (o *OpenAIProvider) translateBatchWithResponses(ctx context.Context, batch 
 	}
 
 	currentContext := make([]ContextMessage, 0, 6)
-	requestText := "Translate the next subtitle batch. Read it with the provided tool, then submit the complete translation with the submission tool."
+	requestText := "Translate the next subtitle batch using this two-step protocol: first call read_translation_batch with {} before any records are provided; do not call submit_translations or emit assistant text. Immediately after receiving the read_translation_batch output, translate all records and call submit_translations exactly once with the complete translated records; do not call read_translation_batch again for this batch or emit assistant text."
 	requestMessage := responses.ResponseInputItemParamOfMessage(requestText, responses.EasyInputMessageRoleUser)
 	input = append(input, requestMessage)
 	currentContext = append(currentContext, ContextMessage{Role: "user", Content: requestText})
@@ -56,13 +56,12 @@ func (o *OpenAIProvider) translateBatchWithResponses(ctx context.Context, batch 
 		defer translationConfig.ProgressUpdater.SetLoading(false)
 	}
 
+	instruction := o.getResponsesInstruction(translationConfig)
 	readResponse, err := o.sendResponsesRequest(
 		ctx,
 		input,
 		translationConfig,
-		o.getResponsesInstruction(translationConfig),
-		readTranslationBatchDefinition(),
-		readTranslationBatchTool,
+		instruction,
 	)
 	if err != nil {
 		return nil, err
@@ -95,9 +94,7 @@ func (o *OpenAIProvider) translateBatchWithResponses(ctx context.Context, batch 
 		ctx,
 		input,
 		translationConfig,
-		o.getResponsesInstruction(translationConfig),
-		submitTranslationsDefinition(),
-		submitTranslationsTool,
+		instruction,
 	)
 	if err != nil {
 		return nil, err
@@ -129,7 +126,7 @@ func (o *OpenAIProvider) translateBatchWithResponses(ctx context.Context, batch 
 	}, nil
 }
 
-func (o *OpenAIProvider) sendResponsesRequest(ctx context.Context, input responses.ResponseInputParam, translationConfig *TranslationConfig, instruction string, tool responses.ToolUnionParam, toolName string) (*responses.Response, error) {
+func (o *OpenAIProvider) sendResponsesRequest(ctx context.Context, input responses.ResponseInputParam, translationConfig *TranslationConfig, instruction string) (*responses.Response, error) {
 	promptCacheKey, errPromptCacheKey := o.getOrCreatePromptCacheKey()
 	if errPromptCacheKey != nil {
 		return nil, errPromptCacheKey
@@ -145,9 +142,9 @@ func (o *OpenAIProvider) sendResponsesRequest(ctx context.Context, input respons
 		ParallelToolCalls: openai.Bool(false),
 		PromptCacheKey:    openai.String(promptCacheKey),
 		Store:             openai.Bool(false),
-		Tools:             []responses.ToolUnionParam{tool},
+		Tools:             responsesTranslationTools(),
 		ToolChoice: responses.ResponseNewParamsToolChoiceUnion{
-			OfFunctionTool: &responses.ToolChoiceFunctionParam{Name: toolName},
+			OfToolChoiceMode: openai.Opt(responses.ToolChoiceOptionsAuto),
 		},
 	}
 
@@ -610,13 +607,21 @@ func requiredFunctionCall(output []responses.ResponseOutputItemUnion, expectedNa
 
 func validateReadToolArguments(arguments string) error {
 	var values map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(arguments), &values); err != nil {
-		return err
+	if errUnmarshal := json.Unmarshal([]byte(arguments), &values); errUnmarshal != nil {
+		return errUnmarshal
 	}
 	if len(values) != 0 {
 		return fmt.Errorf("read_translation_batch does not accept arguments")
 	}
 	return nil
+}
+
+// responsesTranslationTools returns both tools in a stable order for prompt caching.
+func responsesTranslationTools() []responses.ToolUnionParam {
+	return []responses.ToolUnionParam{
+		readTranslationBatchDefinition(),
+		submitTranslationsDefinition(),
+	}
 }
 
 func readTranslationBatchDefinition() responses.ToolUnionParam {
@@ -626,7 +631,7 @@ func readTranslationBatchDefinition() responses.ToolUnionParam {
 		"required":             []string{},
 		"additionalProperties": false,
 	}, true)
-	tool.OfFunction.Description = openai.String("Read the current batch of subtitle records that must be translated.")
+	tool.OfFunction.Description = openai.String("First step: call read_translation_batch with {} to read the current batch of subtitle records before translating or calling submit_translations. After receiving its output, translate all records and call submit_translations exactly once. Do not call read_translation_batch again for this batch or emit assistant text.")
 	return tool
 }
 
@@ -652,7 +657,7 @@ func submitTranslationsDefinition() responses.ToolUnionParam {
 		"required":             []string{"records"},
 		"additionalProperties": false,
 	}, true)
-	tool.OfFunction.Description = openai.String("Submit every translated subtitle record in the original order.")
+	tool.OfFunction.Description = openai.String("Second step: immediately after receiving the read_translation_batch output, translate all records and call submit_translations exactly once with every translated subtitle record in the original order. Do not call this tool before receiving the records, call read_translation_batch again for this batch, or emit assistant text.")
 	return tool
 }
 
@@ -660,6 +665,10 @@ func (o *OpenAIProvider) getResponsesInstruction(translationConfig *TranslationC
 	instruction := fmt.Sprintf(`You are an assistant that translates subtitles from any language to %s.
 
 For every batch, call read_translation_batch to obtain the records. After translating all records, call submit_translations exactly once with the complete result. Never return translations as assistant text.
+
+Follow this two-step protocol strictly, even when tool_choice is auto:
+1. When asked to translate the next batch and before any records are provided, call read_translation_batch with {} first. Do not call submit_translations or emit assistant text at this stage.
+2. Immediately after receiving the read_translation_batch output, translate all records and call submit_translations exactly once with the complete translated records. Do not call read_translation_batch again for this batch or emit assistant text.
 
 Each record contains:
 - index: an integer translation index

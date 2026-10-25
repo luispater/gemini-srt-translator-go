@@ -80,13 +80,16 @@ func TestOpenAIResponsesTranslateBatchUsesToolsAndPreservesReasoningContext(t *t
 		{Index: 10, Content: "First source", Guard: "GST_LINE_000010"},
 		{Index: 11, Content: "Second source", Guard: "GST_LINE_000011"},
 	}
-	result, err := provider.TranslateBatch(context.Background(), batch, nil, &TranslationConfig{
-		ModelName:      "gpt-test",
-		TargetLanguage: "Simplified Chinese",
-		Streaming:      false,
-		Thinking:       true,
-		ThinkingLevel:  "high",
-	})
+	translationConfig := &TranslationConfig{
+		ModelName:        "gpt-test",
+		TargetLanguage:   "Simplified Chinese",
+		Streaming:        false,
+		Thinking:         true,
+		ThinkingLevel:    "high",
+		Description:      "Preserve character names.",
+		RetryInstruction: "Preserve every guard token.",
+	}
+	result, err := provider.TranslateBatch(context.Background(), batch, nil, translationConfig)
 	if err != nil {
 		t.Fatalf("TranslateBatch() error = %v", err)
 	}
@@ -106,9 +109,14 @@ func TestOpenAIResponsesTranslateBatchUsesToolsAndPreservesReasoningContext(t *t
 		t.Fatalf("request count = %d, want 2", len(capturedBodies))
 	}
 	var promptCacheKeys []string
+	var rawToolsPayloads []string
+	wantInstruction := provider.getResponsesInstruction(translationConfig)
 	for requestIndex, requestBody := range capturedBodies {
 		var requestData struct {
-			PromptCacheKey string `json:"prompt_cache_key"`
+			PromptCacheKey string          `json:"prompt_cache_key"`
+			Instructions   string          `json:"instructions"`
+			ToolChoice     string          `json:"tool_choice"`
+			RawTools       json.RawMessage `json:"tools"`
 		}
 		if errUnmarshal := json.Unmarshal(requestBody, &requestData); errUnmarshal != nil {
 			t.Fatalf("failed to decode request %d: %v", requestIndex+1, errUnmarshal)
@@ -117,15 +125,37 @@ func TestOpenAIResponsesTranslateBatchUsesToolsAndPreservesReasoningContext(t *t
 			t.Errorf("request %d prompt_cache_key = %q, want UUID v4", requestIndex+1, requestData.PromptCacheKey)
 		}
 		promptCacheKeys = append(promptCacheKeys, requestData.PromptCacheKey)
+		rawToolsPayloads = append(rawToolsPayloads, string(requestData.RawTools))
+		if requestData.Instructions != wantInstruction {
+			t.Errorf("request %d instructions differ from the shared batch instructions", requestIndex+1)
+		}
+		if requestData.ToolChoice != "auto" {
+			t.Errorf("request %d tool_choice = %q, want auto", requestIndex+1, requestData.ToolChoice)
+		}
+		var parsedTools []struct {
+			Name string `json:"name"`
+		}
+		if errUnmarshalTools := json.Unmarshal(requestData.RawTools, &parsedTools); errUnmarshalTools != nil {
+			t.Fatalf("failed to decode request %d tools: %v", requestIndex+1, errUnmarshalTools)
+		}
+		wantToolNames := []string{readTranslationBatchTool, submitTranslationsTool}
+		if len(parsedTools) != len(wantToolNames) {
+			t.Fatalf("request %d tool count = %d, want %d", requestIndex+1, len(parsedTools), len(wantToolNames))
+		}
+		for toolIndex, wantToolName := range wantToolNames {
+			if parsedTools[toolIndex].Name != wantToolName {
+				t.Errorf("request %d tool %d name = %q, want %q", requestIndex+1, toolIndex, parsedTools[toolIndex].Name, wantToolName)
+			}
+		}
 	}
 	if promptCacheKeys[0] != promptCacheKeys[1] {
 		t.Errorf("tool requests used different prompt cache keys: %q and %q", promptCacheKeys[0], promptCacheKeys[1])
 	}
+	if rawToolsPayloads[0] != rawToolsPayloads[1] {
+		t.Errorf("tool requests used different tools payloads: %s vs %s", rawToolsPayloads[0], rawToolsPayloads[1])
+	}
 	if strings.Contains(string(capturedBodies[0]), "First source") {
 		t.Error("first Responses request contained subtitle records before the read tool call")
-	}
-	if !strings.Contains(string(capturedBodies[0]), `"name":"read_translation_batch"`) {
-		t.Error("first Responses request did not force read_translation_batch")
 	}
 	if !strings.Contains(string(capturedBodies[0]), `"reasoning.encrypted_content"`) {
 		t.Error("Responses request did not include encrypted reasoning content")
@@ -138,9 +168,6 @@ func TestOpenAIResponsesTranslateBatchUsesToolsAndPreservesReasoningContext(t *t
 	}
 	if !strings.Contains(string(capturedBodies[1]), `"encrypted_content":"signature-read"`) {
 		t.Error("second Responses request did not preserve the first reasoning signature")
-	}
-	if !strings.Contains(string(capturedBodies[1]), `"name":"submit_translations"`) {
-		t.Error("second Responses request did not force submit_translations")
 	}
 
 	contextJSON, err := json.Marshal(result.Context)
@@ -347,8 +374,6 @@ func TestOpenAIResponsesStreamingReturnsCompletedToolCall(t *testing.T) {
 		nil,
 		&TranslationConfig{ModelName: "gpt-test", Streaming: true},
 		"Call the tool.",
-		readTranslationBatchDefinition(),
-		readTranslationBatchTool,
 	)
 	if err != nil {
 		t.Fatalf("sendResponsesRequest() error = %v", err)
@@ -419,8 +444,6 @@ func TestOpenAIResponsesStreamingPreservesTerminalErrors(t *testing.T) {
 				nil,
 				&TranslationConfig{ModelName: "gpt-5", Streaming: true},
 				"Call the tool.",
-				readTranslationBatchDefinition(),
-				readTranslationBatchTool,
 			)
 			if errRequest == nil || !strings.Contains(errRequest.Error(), testCase.expectedError) {
 				t.Fatalf("sendResponsesRequest() error = %v, want error containing %q", errRequest, testCase.expectedError)
@@ -546,8 +569,6 @@ func TestOpenAIResponsesRequestParameterCompatibility(t *testing.T) {
 				nil,
 				translationConfig,
 				"Call the tool.",
-				readTranslationBatchDefinition(),
-				readTranslationBatchTool,
 			)
 			if errRequest != nil {
 				t.Fatalf("sendResponsesRequest() error = %v", errRequest)
@@ -840,8 +861,35 @@ func TestOpenAIResponsesIgnoresEmptyAssistantMessageInContext(t *testing.T) {
 	capturedBodies := append([][]byte(nil), requestBodies...)
 	mutex.Unlock()
 
-	if len(capturedBodies) < 3 {
-		t.Fatalf("expected at least 3 captured requests, got %d", len(capturedBodies))
+	if len(capturedBodies) != 4 {
+		t.Fatalf("expected 4 captured requests across 2 batches, got %d", len(capturedBodies))
+	}
+
+	var firstBatchTools string
+	var firstBatchInstructions string
+	for reqIdx, reqBody := range capturedBodies {
+		var prefixCheck struct {
+			Instructions string          `json:"instructions"`
+			ToolChoice   string          `json:"tool_choice"`
+			Tools        json.RawMessage `json:"tools"`
+		}
+		if errUnmarshalPrefix := json.Unmarshal(reqBody, &prefixCheck); errUnmarshalPrefix != nil {
+			t.Fatalf("failed to unmarshal request %d prefix fields: %v", reqIdx+1, errUnmarshalPrefix)
+		}
+		if prefixCheck.ToolChoice != "auto" {
+			t.Errorf("request %d tool_choice = %q, want auto", reqIdx+1, prefixCheck.ToolChoice)
+		}
+		if reqIdx == 0 {
+			firstBatchInstructions = prefixCheck.Instructions
+			firstBatchTools = string(prefixCheck.Tools)
+			continue
+		}
+		if prefixCheck.Instructions != firstBatchInstructions {
+			t.Errorf("request %d instructions changed across stages/batches", reqIdx+1)
+		}
+		if string(prefixCheck.Tools) != firstBatchTools {
+			t.Errorf("request %d tools payload changed across stages/batches", reqIdx+1)
+		}
 	}
 
 	// Request 3 is the first request of Batch 2, which receives restored context
@@ -1092,6 +1140,30 @@ func TestSanitizeResponsesInputFiltersCorruptedAssistantMessages(t *testing.T) {
 	}
 	if !strings.Contains(string(data1), "msg_ref_123") {
 		t.Errorf("expected item reference to be preserved, got: %s", string(data1))
+	}
+}
+
+func TestOpenAIResponsesInstructionEnforcesTwoStepToolProtocol(t *testing.T) {
+	provider, errNewProvider := NewOpenAIProvider(&config.Config{})
+	if errNewProvider != nil {
+		t.Fatalf("NewOpenAIProvider() error = %v", errNewProvider)
+	}
+
+	instruction := provider.getResponsesInstruction(&TranslationConfig{
+		TargetLanguage: "French",
+	})
+	expectedSnippets := []string{
+		"For every batch, call read_translation_batch to obtain the records. After translating all records, call submit_translations exactly once with the complete result. Never return translations as assistant text.",
+		"Follow this two-step protocol strictly, even when tool_choice is auto:",
+		"When asked to translate the next batch and before any records are provided, call read_translation_batch with {} first.",
+		"Do not call submit_translations or emit assistant text at this stage.",
+		"Immediately after receiving the read_translation_batch output, translate all records and call submit_translations exactly once with the complete translated records.",
+		"Do not call read_translation_batch again for this batch or emit assistant text.",
+	}
+	for _, snippet := range expectedSnippets {
+		if !strings.Contains(instruction, snippet) {
+			t.Errorf("getResponsesInstruction() missing expected protocol rule %q", snippet)
+		}
 	}
 }
 
