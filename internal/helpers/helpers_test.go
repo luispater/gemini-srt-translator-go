@@ -30,6 +30,8 @@ func TestGetInstruction(t *testing.T) {
 				"Do NOT think or reason",
 				"index: an integer translation index",
 				"content: the text to translate",
+				"faithfulness, expressiveness, and elegance",
+				"Keep the translated subtitle length as similar as possible to the original subtitle segment",
 			},
 			wantNotContains: []string{
 				"Think deeply and reason",

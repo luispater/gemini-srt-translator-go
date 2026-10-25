@@ -1094,3 +1094,30 @@ func TestSanitizeResponsesInputFiltersCorruptedAssistantMessages(t *testing.T) {
 		t.Errorf("expected item reference to be preserved, got: %s", string(data1))
 	}
 }
+
+func TestOpenAIInstructionsIncludeTranslationQualityAndLengthRequirements(t *testing.T) {
+	provider, errNewProvider := NewOpenAIProvider(&config.Config{})
+	if errNewProvider != nil {
+		t.Fatalf("NewOpenAIProvider() error = %v", errNewProvider)
+	}
+
+	chatInstruction := provider.getInstruction("Simplified Chinese", "")
+	responsesInstruction := provider.getResponsesInstruction(&TranslationConfig{
+		TargetLanguage: "Simplified Chinese",
+	})
+
+	expectedSnippets := []string{
+		"faithfulness, expressiveness, and elegance",
+		"Keep the translated subtitle length as similar as possible to the original subtitle segment",
+		"do not embellish, exaggerate, or add any extra content beyond the source text",
+	}
+
+	for _, snippet := range expectedSnippets {
+		if !strings.Contains(chatInstruction, snippet) {
+			t.Errorf("getInstruction() missing expected snippet %q", snippet)
+		}
+		if !strings.Contains(responsesInstruction, snippet) {
+			t.Errorf("getResponsesInstruction() missing expected snippet %q", snippet)
+		}
+	}
+}

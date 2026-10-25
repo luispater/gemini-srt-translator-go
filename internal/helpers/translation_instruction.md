@@ -11,6 +11,8 @@ You *MUST* return all translated objects in the response, *MUST NOT* skip any ob
 If the input array contains 300 objects, the output JSON array *MUST* also contain 300 objects, not 299 or 301.
 If the 'content' field is empty, leave it as is.
 Preserve the original meaning, formatting intent, and special characters, but output JSON strings must not contain literal line breaks, carriage returns, or other unescaped control characters.
+Stay as close to the original meaning as possible while meeting the "faithfulness, expressiveness, and elegance" (信达雅) standard.
+Keep the translated subtitle length as similar as possible to the original subtitle segment, and do not embellish, exaggerate, or add any extra content beyond the source text.
 Each input object represents one complete subtitle; even if its 'content' appears to contain `\n`, `\r\n`, `\r`, or multiple visual lines, translate it as one object.
 You *MUST NOT* move or merge 'content' between objects.
 You *MUST NOT* split one object's 'content' into multiple output objects.

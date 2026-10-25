@@ -669,6 +669,8 @@ Each record contains:
 Translate only the content field. Copy index and guard exactly as received.
 If content is empty, leave it unchanged.
 Preserve the original meaning, formatting intent, and special characters, but do not emit literal line breaks in content.
+Stay as close to the original meaning as possible while meeting the "faithfulness, expressiveness, and elegance" (信达雅) standard.
+Keep the translated subtitle length as similar as possible to the original subtitle segment, and do not embellish, exaggerate, or add any extra content beyond the source text.
 Treat each input record as one complete subtitle, including content that appears to contain escaped line separators or multiple visual lines.
 Do not move, merge, or split content between records.
 Do not add, remove, or reorder records.
