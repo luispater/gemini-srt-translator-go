@@ -11,6 +11,7 @@ func TestNewConfig(t *testing.T) {
 	t.Setenv(EnvBaseURL, "")
 	t.Setenv(EnvAPIKey, "")
 	t.Setenv(EnvModel, "")
+	t.Setenv(EnvReasoningEffort, "")
 	t.Setenv("GEMINI_API_KEY", "")
 	t.Setenv("GOOGLE_GEMINI_BASE_URL", "")
 
@@ -57,6 +58,7 @@ func TestNewConfigFromSRTEnvironment(t *testing.T) {
 	t.Setenv(EnvBaseURL, "https://example.com/v1")
 	t.Setenv(EnvAPIKey, "key1, key2")
 	t.Setenv(EnvModel, "gpt-test")
+	t.Setenv(EnvReasoningEffort, "xhigh")
 	t.Setenv("GEMINI_API_KEY", "legacy-key")
 	t.Setenv("GOOGLE_GEMINI_BASE_URL", "https://legacy.example.com")
 
@@ -76,6 +78,9 @@ func TestNewConfigFromSRTEnvironment(t *testing.T) {
 	}
 	if len(cfg.APIKeys) != 2 || cfg.APIKeys[0] != "key1" || cfg.APIKeys[1] != "key2" {
 		t.Errorf("Expected SRT translator API keys, got %v", cfg.APIKeys)
+	}
+	if cfg.ThinkingLevel != "xhigh" {
+		t.Errorf("Expected thinking level 'xhigh', got %q", cfg.ThinkingLevel)
 	}
 }
 

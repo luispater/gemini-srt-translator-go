@@ -67,7 +67,7 @@ Perfect for anyone needing fast, accurate, and customizable translations for vid
 	rootCmd.Flags().Float32Var(&temperature, "temperature", 1.0, "Temperature (0.0-2.0)")
 	rootCmd.Flags().Float32Var(&topP, "top-p", 0.95, "Top P (0.0-1.0)")
 	rootCmd.Flags().Float32Var(&topK, "top-k", 0, "Top K (>=0)")
-	rootCmd.Flags().StringVar(&commandConfig.ThinkingLevel, "thinking-level", commandConfig.ThinkingLevel, "Thinking level (minimal, low, medium, high)")
+	rootCmd.Flags().StringVar(&commandConfig.ThinkingLevel, "thinking-level", commandConfig.ThinkingLevel, "Thinking level (minimal, low, medium, high, xhigh, max)")
 
 	// Boolean flags
 	var noStreaming, noThinking, noColors, progressLog, quiet bool

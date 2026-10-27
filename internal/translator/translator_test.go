@@ -162,6 +162,50 @@ func TestTranslator_validateConfigOpenAIProtocol(t *testing.T) {
 	}
 }
 
+func TestTranslator_validateConfigThinkingLevel(t *testing.T) {
+	inputFile, errCreate := os.CreateTemp("", "translator_thinking_*.srt")
+	if errCreate != nil {
+		t.Fatalf("failed to create temporary input: %v", errCreate)
+	}
+	inputPath := inputFile.Name()
+	if errClose := inputFile.Close(); errClose != nil {
+		t.Fatalf("failed to close temporary input: %v", errClose)
+	}
+	defer func() {
+		_ = os.Remove(inputPath)
+	}()
+
+	tests := []struct {
+		name    string
+		level   string
+		wantErr bool
+	}{
+		{name: "minimal", level: "minimal", wantErr: false},
+		{name: "low", level: "low", wantErr: false},
+		{name: "medium", level: "medium", wantErr: false},
+		{name: "high", level: "high", wantErr: false},
+		{name: "xhigh", level: "xhigh", wantErr: false},
+		{name: "max", level: "max", wantErr: false},
+		{name: "trimmed uppercase xhigh", level: " XHIGH ", wantErr: false},
+		{name: "trimmed uppercase max", level: " MAX ", wantErr: false},
+		{name: "invalid level", level: "ultra", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.NewConfig()
+			cfg.ThinkingLevel = tt.level
+			cfg.InputFile = inputPath
+			translator := &Translator{config: cfg}
+
+			errValidate := translator.validateConfig()
+			if (errValidate != nil) != tt.wantErr {
+				t.Errorf("validateConfig() error = %v, wantErr %v", errValidate, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestTranslator_prepareSRTFile(t *testing.T) {
 	// Create temporary test files
 	tempDir, err := os.MkdirTemp("", "translator_test")

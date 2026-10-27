@@ -149,7 +149,7 @@ export OPENAI_API_KEY="your_openai_api_key"
 - `TopK`: Top-k 采样参数 (>=0)
 - `Streaming`: 启用流式响应 (默认: true)
 - `Thinking`: 启用思考能力 (默认: true)
-- `ThinkingLevel`: 思考级别 (minimal, low, medium, high; 默认: high)
+- `ThinkingLevel`: 思考级别 (minimal, low, medium, high, xhigh, max; 默认: high)
 
 ### 用户选项
 

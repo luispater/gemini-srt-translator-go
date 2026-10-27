@@ -525,6 +525,24 @@ func TestOpenAIResponsesRequestParameterCompatibility(t *testing.T) {
 			wantReasoning: true,
 			wantEffort:    "low",
 		},
+		{
+			name:          "gpt-6.1-terra sends xhigh reasoning",
+			modelName:     "gpt-6.1-terra",
+			thinking:      true,
+			thinkingLevel: "xhigh",
+			wantReasoning: true,
+			wantEffort:    "xhigh",
+			wantSummary:   true,
+		},
+		{
+			name:          "gpt-6.1-terra sends max reasoning",
+			modelName:     "gpt-6.1-terra",
+			thinking:      true,
+			thinkingLevel: "max",
+			wantReasoning: true,
+			wantEffort:    "max",
+			wantSummary:   true,
+		},
 	}
 
 	for _, testCase := range tests {
@@ -623,6 +641,8 @@ func TestSupportsResponsesReasoningExcludesGPT5ChatVariants(t *testing.T) {
 	}{
 		{modelName: "gpt-5", want: true},
 		{modelName: "openai/gpt-5-mini", want: true},
+		{modelName: "gpt-6.1-terra", want: true},
+		{modelName: "devin/gpt-6-sol", want: true},
 		{modelName: "gpt-5-chat-latest", want: false},
 		{modelName: "openai/gpt-5.1-chat", want: false},
 		{modelName: "o3-mini", want: true},
@@ -649,6 +669,11 @@ func TestResponsesReasoningEffortUsesModelSupportedMinimums(t *testing.T) {
 		{modelName: "o3-mini", thinkingLevel: "minimal", want: "low"},
 		{modelName: "gpt-5-pro", thinkingLevel: "low", want: "high"},
 		{modelName: "openai/o3-pro", thinkingLevel: "medium", want: "high"},
+		{modelName: "gpt-5", thinkingLevel: "xhigh", want: "xhigh"},
+		{modelName: "gpt-5", thinkingLevel: "max", want: "max"},
+		{modelName: "gpt-6.1-terra", thinkingLevel: "minimal", want: "minimal"},
+		{modelName: "gpt-6.1-terra", thinkingLevel: "xhigh", want: "xhigh"},
+		{modelName: "gpt-6.1-terra", thinkingLevel: "max", want: "max"},
 	}
 
 	for _, testCase := range tests {

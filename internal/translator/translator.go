@@ -516,9 +516,9 @@ func (t *Translator) validateConfig() error {
 	}
 
 	switch strings.ToLower(strings.TrimSpace(t.config.ThinkingLevel)) {
-	case "minimal", "low", "medium", "high":
+	case "minimal", "low", "medium", "high", "xhigh", "max":
 	default:
-		return errors.NewConfigurationError("thinking level must be one of minimal, low, medium, high", nil).WithContext("thinking_level", t.config.ThinkingLevel)
+		return errors.NewConfigurationError("thinking level must be one of minimal, low, medium, high, xhigh, max", nil).WithContext("thinking_level", t.config.ThinkingLevel)
 	}
 
 	if t.config.Temperature != nil && (*t.config.Temperature < 0 || *t.config.Temperature > 2) {

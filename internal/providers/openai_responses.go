@@ -383,20 +383,37 @@ func responseStreamError(responseError responses.ResponseErrorEvent) error {
 
 func supportsResponsesReasoning(modelName string) bool {
 	normalizedModel := normalizeResponsesModelName(modelName)
-	if strings.HasPrefix(normalizedModel, "gpt-5") {
-		return !strings.Contains(normalizedModel, "-chat")
+	if isGPTReasoningModel(normalizedModel) {
+		return true
 	}
 	return len(normalizedModel) > 1 && normalizedModel[0] == 'o' && normalizedModel[1] >= '0' && normalizedModel[1] <= '9'
 }
 
+func isGPTReasoningModel(normalizedModel string) bool {
+	if !strings.HasPrefix(normalizedModel, "gpt-") || strings.Contains(normalizedModel, "-chat") {
+		return false
+	}
+	versionPart := normalizedModel[len("gpt-"):]
+	digitCount := 0
+	majorVersion := 0
+	for digitCount < len(versionPart) && versionPart[digitCount] >= '0' && versionPart[digitCount] <= '9' {
+		majorVersion = majorVersion*10 + int(versionPart[digitCount]-'0')
+		digitCount++
+	}
+	return digitCount > 0 && majorVersion >= 5
+}
+
 func responsesReasoningEffort(modelName string, thinkingLevel string) responses.ReasoningEffort {
 	normalizedModel := normalizeResponsesModelName(modelName)
+	normalizedLevel := strings.ToLower(strings.TrimSpace(thinkingLevel))
 	if strings.Contains(normalizedModel, "-pro") {
+		if normalizedLevel == "xhigh" || normalizedLevel == "max" {
+			return responses.ReasoningEffort(normalizedLevel)
+		}
 		return responses.ReasoningEffortHigh
 	}
 
-	normalizedLevel := strings.ToLower(strings.TrimSpace(thinkingLevel))
-	if normalizedLevel == "minimal" && !strings.HasPrefix(normalizedModel, "gpt-5") {
+	if normalizedLevel == "minimal" && !isGPTReasoningModel(normalizedModel) {
 		normalizedLevel = "low"
 	}
 	return responses.ReasoningEffort(normalizedLevel)

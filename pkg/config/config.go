@@ -16,6 +16,8 @@ const (
 	EnvAPIKey = "SRT_TRANSLATOR_API_KEY"
 	// EnvModel configures the model name.
 	EnvModel = "SRT_TRANSLATOR_MODEL"
+	// EnvReasoningEffort configures the default thinking level.
+	EnvReasoningEffort = "SRT_TRANSLATOR_REASONING_EFFORT"
 )
 
 // Config holds all configuration for the translator
@@ -137,7 +139,7 @@ func NewConfig() *Config {
 		RetryCount:     3,
 		Streaming:      true,
 		Thinking:       true,
-		ThinkingLevel:  "high",
+		ThinkingLevel:  environmentOrDefault(EnvReasoningEffort, "high"),
 		FreeQuota:      true,
 		UseColors:      true,
 		ProgressLog:    false,

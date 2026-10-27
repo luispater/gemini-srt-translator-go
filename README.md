@@ -149,7 +149,7 @@ Use interactive mode to see and select from available models:
 - `TopK`: Top-k sampling parameter (>=0)
 - `Streaming`: Enable streamed responses (default: true)
 - `Thinking`: Enable thinking capability (default: true)
-- `ThinkingLevel`: Thinking level for reasoning (minimal, low, medium, high; default: high)
+- `ThinkingLevel`: Thinking level for reasoning (minimal, low, medium, high, xhigh, max; default: high)
 
 ### User Options
 

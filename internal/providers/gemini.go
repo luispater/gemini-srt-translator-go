@@ -45,7 +45,7 @@ func parseThinkingLevel(level string) genai.ThinkingLevel {
 		return genai.ThinkingLevelLow
 	case "medium":
 		return genai.ThinkingLevelMedium
-	case "high":
+	case "high", "xhigh", "max":
 		return genai.ThinkingLevelHigh
 	default:
 		return genai.ThinkingLevelHigh
